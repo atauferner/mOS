@@ -75,6 +75,7 @@
 #include <linux/memremap.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/mm_inline.h>
+#include <linux/mos.h>
 
 #include <asm/tlbflush.h>
 
@@ -2566,3 +2567,38 @@ void hugepage_add_new_anon_rmap(struct folio *folio,
 	__page_set_anon_rmap(folio, &folio->page, vma, address, 1);
 }
 #endif /* CONFIG_HUGETLB_PAGE */
+
+#ifdef CONFIG_MOS_LWKMEM
+/*
+ * Do not modify Linux's global counters while setting up LWK pages.
+ */
+void lwkpage_add_rmap(struct page *page, struct vm_area_struct *vma,
+		unsigned long address)
+{
+	struct folio *folio = page_folio(page);
+
+	if (address < vma->vm_start ||
+	    (!(vma->vm_flags & VM_LWK_HEAP) && address >= vma->vm_end)) {
+		LWKMEM_ERROR("Address %lx outside VMA [%lx, %lx)",
+			     address, vma->vm_start, vma->vm_end);
+		return;
+	}
+
+	if (PageCompound(page))
+		atomic_set(&folio->_entire_mapcount, 0);
+	else
+		atomic_set(&page->_mapcount, 0);
+	__page_set_anon_rmap(folio, page, vma, address, 1);
+}
+
+void lwkpage_remove_rmap(struct page *page)
+{
+	struct folio *folio = page_folio(page);
+
+	/* So far there is no multiple references to LWK pages */
+	if (PageCompound(page))
+		atomic_set(&folio->_entire_mapcount, -1);
+	else
+		atomic_set(&page->_mapcount, -1);
+}
+#endif

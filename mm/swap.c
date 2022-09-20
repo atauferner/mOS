@@ -37,6 +37,7 @@
 #include <linux/page_idle.h>
 #include <linux/local_lock.h>
 #include <linux/buffer_head.h>
+#include <linux/mos.h>
 
 #include "internal.h"
 
@@ -121,6 +122,8 @@ static void __folio_put_large(struct folio *folio)
 
 void __folio_put(struct folio *folio)
 {
+	if (is_lwkpg(&folio->page))
+		return;
 	if (unlikely(folio_is_zone_device(folio)))
 		free_zone_device_page(&folio->page);
 	else if (unlikely(folio_test_large(folio)))
@@ -998,6 +1001,9 @@ void release_pages(release_pages_arg arg, int nr)
 		}
 
 		if (!folio_put_testzero(folio))
+			continue;
+
+		if (is_lwkpg(&folio->page))
 			continue;
 
 		if (folio_test_large(folio)) {
