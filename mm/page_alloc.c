@@ -53,6 +53,9 @@
 #include <linux/khugepaged.h>
 #include <linux/delayacct.h>
 #include <linux/cacheinfo.h>
+
+#include <linux/mos.h>
+
 #include <asm/div64.h>
 #include "internal.h"
 #include "shuffle.h"
@@ -771,6 +774,12 @@ static inline void __free_one_page(struct page *page,
 	unsigned long combined_pfn;
 	struct page *buddy;
 	bool to_tail;
+
+	if (is_lwkpg(page)) {
+		pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+		dump_stack();
+		return;
+	}
 
 	VM_BUG_ON(!zone_is_initialized(zone));
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
@@ -2342,6 +2351,12 @@ static bool free_unref_page_prepare(struct page *page, unsigned long pfn,
 							unsigned int order)
 {
 	int migratetype;
+
+        if (is_lwkpg(page)) {
+                pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+                dump_stack();
+                return false;
+        }
 
 	if (!free_pages_prepare(page, order, FPI_NONE))
 		return false;
@@ -5656,6 +5671,8 @@ __meminit void zone_pcp_init(struct zone *zone)
 		pr_debug("  %s zone: %lu pages, LIFO batch:%u\n", zone->name,
 			 zone->present_pages, zone_batchsize(zone));
 }
+
+
 
 void adjust_managed_page_count(struct page *page, long count)
 {

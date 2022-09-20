@@ -47,6 +47,7 @@
 #include <linux/dax.h>
 #include <linux/uaccess.h>
 #include <linux/rseq.h>
+#include <linux/mos.h>
 #include <asm/param.h>
 #include <asm/page.h>
 
@@ -402,9 +403,25 @@ static unsigned long elf_load(struct file *filep, unsigned long addr,
 		unsigned long total_size)
 {
 	unsigned long zero_start, zero_end;
-	unsigned long map_addr;
+	unsigned long map_addr = TASK_SIZE;
 
 	if (eppnt->p_filesz) {
+		if (is_lwkmem_enabled(current) &&
+                    !is_lwkvmr_disabled(LWK_VMR_DBSS) &&
+                    !(eppnt->p_flags & PF_X) && (eppnt->p_flags & PF_W)) {
+			unsigned long vstart = ELF_PAGESTART(addr), vsize;
+
+                        vsize = ELF_PAGEALIGN(eppnt->p_memsz +
+				       	      ELF_PAGEOFFSET(addr));
+                        map_addr = lwkmem_elf_map(vstart, vsize, filep,
+				       		  eppnt->p_offset, addr,
+						  eppnt->p_filesz,
+						  ELF_PAGEALIGN(total_size));
+		}
+
+		if (!BAD_ADDR(map_addr))
+			goto last;
+
 		map_addr = elf_map(filep, addr, eppnt, prot, type, total_size);
 		if (BAD_ADDR(map_addr))
 			return map_addr;
@@ -426,6 +443,7 @@ static unsigned long elf_load(struct file *filep, unsigned long addr,
 		zero_end = zero_start + ELF_PAGEOFFSET(eppnt->p_vaddr) +
 			eppnt->p_memsz;
 	}
+last:
 	if (eppnt->p_memsz > eppnt->p_filesz) {
 		/*
 		 * Map the last of the segment.
@@ -837,6 +855,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
 	struct mm_struct *mm;
 	struct pt_regs *regs;
+	int data_bss_on_lwkmem = 0;
 
 	retval = -ENOEXEC;
 	/* First of all, some simple consistency checks */
@@ -1135,7 +1154,10 @@ out_free_interp:
 			retval = IS_ERR_VALUE(error) ?
 				PTR_ERR((void*)error) : -EINVAL;
 			goto out_free_dentry;
-		}
+		} else
+			data_bss_on_lwkmem = is_lwkmem_enabled(current) &&
+				!is_lwkvmr_disabled(LWK_VMR_DBSS) &&
+				!(elf_ppnt->p_flags & PF_X) && (elf_ppnt->p_flags & PF_W);
 
 		if (first_pt_load) {
 			first_pt_load = 0;
@@ -1195,6 +1217,11 @@ out_free_interp:
 	end_data += load_bias;
 
 	current->mm->start_brk = current->mm->brk = ELF_PAGEALIGN(elf_brk);
+	if (data_bss_on_lwkmem) {
+		current->mm->start_brk = ALIGN(current->mm->start_brk,
+					       (unsigned long)SZ_2M);
+		current->mm->brk = current->mm->start_brk;
+	}
 
 	if (interpreter) {
 		elf_entry = load_elf_interp(interp_elf_ex,
@@ -1310,6 +1337,7 @@ out_free_file:
 		fput(interpreter);
 out_free_ph:
 	kfree(elf_phdata);
+
 	goto out;
 }
 

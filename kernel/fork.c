@@ -481,20 +481,23 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 {
 	struct vm_area_struct *new = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 
-	if (!new)
-		return NULL;
+        if (!new)
+                return NULL;
 
-	ASSERT_EXCLUSIVE_WRITER(orig->vm_flags);
-	ASSERT_EXCLUSIVE_WRITER(orig->vm_file);
-	/*
-	 * orig->shared.rb may be modified concurrently, but the clone
-	 * will be reinitialized.
-	 */
-	data_race(memcpy(new, orig, sizeof(*new)));
-	if (!vma_lock_alloc(new)) {
-		kmem_cache_free(vm_area_cachep, new);
-		return NULL;
-	}
+        ASSERT_EXCLUSIVE_WRITER(orig->vm_flags);
+        ASSERT_EXCLUSIVE_WRITER(orig->vm_file);
+        /*
+         * orig->shared.rb may be modified concurrently, but the clone
+         * will be reinitialized.
+         */
+        data_race(memcpy(new, orig, sizeof(*new)));
+        if (!vma_lock_alloc(new)) {
+                kmem_cache_free(vm_area_cachep, new);
+                return NULL;
+        }
+        if (is_lwkvma(orig))
+                vma_set_lwkvma(new);
+
 	INIT_LIST_HEAD(&new->anon_vma_chain);
 	vma_numab_state_init(new);
 	dup_anon_vma_name(orig, new);
@@ -507,6 +510,8 @@ void __vm_area_free(struct vm_area_struct *vma)
 	vma_numab_state_free(vma);
 	free_anon_vma_name(vma);
 	vma_lock_free(vma);
+        if (is_lwkvma(vma))
+                vma_clear_lwkvma(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 }
 
@@ -743,6 +748,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		vma_iter_bulk_store(&vmi, tmp);
 
 		mm->map_count++;
+
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(tmp, mpnt);
 
@@ -752,6 +758,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (retval) {
 			mpnt = vma_next(&vmi);
 			goto loop_out;
+		}
+
+		if (is_lwkvma(mpnt)) {
+			retval = lwkmem_fork(mpnt, tmp);
+			if (retval)
+				goto loop_out;
 		}
 	}
 	/* a new mm has just been created */

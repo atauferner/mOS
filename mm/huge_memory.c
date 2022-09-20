@@ -39,6 +39,8 @@
 #include <linux/memory-tiers.h>
 #include <linux/compat.h>
 
+#include <linux/mos.h>
+
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
 #include "internal.h"
@@ -2678,6 +2680,11 @@ void vma_adjust_trans_huge(struct vm_area_struct *vma,
 			     unsigned long end,
 			     long adjust_next)
 {
+	if (is_lwkvma(vma)) {
+		lwkmem_vma_adjust(vma, start, end);
+		start = end = 0;
+	}
+
 	/* Check if we need to split start first. */
 	split_huge_pmd_if_needed(vma, start);
 
@@ -2692,6 +2699,12 @@ void vma_adjust_trans_huge(struct vm_area_struct *vma,
 		struct vm_area_struct *next = find_vma(vma->vm_mm, vma->vm_end);
 		unsigned long nstart = next->vm_start;
 		nstart += adjust_next;
+
+		if (is_lwkvma(next)) {
+			lwkmem_vma_adjust(next, nstart, next->vm_end);
+			return;
+		}
+
 		split_huge_pmd_if_needed(next, nstart);
 	}
 }
