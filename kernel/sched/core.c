@@ -82,8 +82,8 @@
 #include <trace/events/sched.h>
 #include <trace/events/ipi.h>
 #undef CREATE_TRACE_POINTS
-
 #include "sched.h"
+#include "mos.h"
 #include "stats.h"
 #include "autogroup.h"
 
@@ -1198,6 +1198,10 @@ bool sched_can_stop_tick(struct rq *rq)
 {
 	int fifo_nr_running;
 
+	if (is_lwkrq(rq) && nr_running_mos(rq))
+		return (nr_rr_running_mos(rq) > 1) ? false : true;
+
+
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
 		return false;
@@ -2079,6 +2083,7 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	uclamp_rq_inc(rq, p);
+	assimilate_mos(rq, p);
 	p->sched_class->enqueue_task(rq, p, flags);
 
 	if (sched_core_enabled(rq))
@@ -2451,11 +2456,15 @@ static inline bool rq_has_pinned_tasks(struct rq *rq)
 static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
 {
 	/* When not in the task's cpumask, no point in looking further. */
-	if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+	if (!cpumask_test_cpu(cpu, p->cpus_ptr)) {
 		return false;
+	}
 
 	/* migrate_disabled() must be allowed to finish. */
 	if (is_migration_disabled(p))
+		return cpu_online(cpu);
+
+	if (is_mos_process(p))
 		return cpu_online(cpu);
 
 	/* Non kernel threads are not allowed during either online or offline. */
@@ -2470,7 +2479,7 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
 	if (cpu_dying(cpu))
 		return false;
 
-	/* But are allowed during online. */
+	/* Kernel threads are allowed during online. */
 	return cpu_online(cpu);
 }
 
@@ -2542,7 +2551,6 @@ struct set_affinity_pending {
 static struct rq *__migrate_task(struct rq *rq, struct rq_flags *rf,
 				 struct task_struct *p, int dest_cpu)
 {
-	/* Affinity changed (again). */
 	if (!is_cpu_allowed(p, dest_cpu))
 		return rq;
 
@@ -2599,7 +2607,8 @@ static int migration_cpu_stop(void *data)
 			p->migration_pending = NULL;
 			complete = true;
 
-			if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask))
+			if (!is_mos_process(p) &&
+			    cpumask_test_cpu(task_cpu(p), &p->cpus_mask))
 				goto out;
 		}
 
@@ -2632,12 +2641,11 @@ static int migration_cpu_stop(void *data)
 		 * ->pi_lock, so the allowed mask is stable - if it got
 		 * somewhere allowed, we're done.
 		 */
-		if (cpumask_test_cpu(task_cpu(p), p->cpus_ptr)) {
+		if (!is_mos_process(p) && cpumask_test_cpu(task_cpu(p), p->cpus_ptr)) {
 			p->migration_pending = NULL;
 			complete = true;
 			goto out;
 		}
-
 		/*
 		 * When migrate_enable() hits a rq mis-match we can't reliably
 		 * determine is_migration_disabled() and so have to chase after
@@ -2864,6 +2872,9 @@ void release_user_cpus_ptr(struct task_struct *p)
 	kfree(clear_user_cpus_ptr(p));
 }
 
+
+static int select_fallback_rq(int cpu, struct task_struct *p);
+
 /*
  * This function is wildly self concurrent; here be dragons.
  *
@@ -2949,7 +2960,9 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 	bool stop_pending, complete = false;
 
 	/* Can the task run on the task's current CPU? If so, we're done */
-	if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
+	if ((!is_mos_process(p) && cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) ||
+	    (is_mos_process(p) && (task_cpu(p) == dest_cpu) &&
+	     cpumask_test_cpu(dest_cpu, &p->cpus_mask))) {
 		struct task_struct *push_task = NULL;
 
 		if ((flags & SCA_MIGRATE_ENABLE) &&
@@ -2972,7 +2985,7 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 		task_rq_unlock(rq, p, rf);
 		if (push_task) {
 			stop_one_cpu_nowait(rq->cpu, push_cpu_stop,
-					    p, &rq->push_work);
+						p, &rq->push_work);
 		}
 		preempt_enable();
 
@@ -3114,6 +3127,9 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 		 * set_cpus_allowed_common() and actually reset p->cpus_ptr.
 		 */
 		cpu_valid_mask = cpu_online_mask;
+	} else if (is_mos_process(p)) {
+		/* mOS threads are allowed on online && !active CPUs */
+		cpu_valid_mask = cpu_online_mask;
 	}
 
 	if (!kthread && !cpumask_subset(ctx->new_mask, cpu_allowed_mask)) {
@@ -3156,7 +3172,18 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 		goto out;
 	}
 
+        if (is_mos_process(p) &&
+            !is_migration_mask_valid_mos(ctx->new_mask, p)) {
+                ret = -EINVAL;
+                goto out;
+        }
+
 	__do_set_cpus_allowed(p, ctx);
+
+	if (is_mos_process(p))
+		dest_cpu = select_next_cpu_mos(p, ctx->new_mask);
+	else if (cpu_islwkcpu(dest_cpu))
+	  dest_cpu = select_fallback_rq(dest_cpu, p);
 
 	return affine_move_task(rq, p, rf, dest_cpu, ctx->flags);
 
@@ -3547,7 +3574,21 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	const struct cpumask *nodemask = NULL;
 	enum { cpuset, possible, fail } state = cpuset;
 	int dest_cpu;
+	cpumask_var_t linux_cpus, allowed;
 
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC) &&
+	    ((!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) ||
+	     (!zalloc_cpumask_var(&allowed, GFP_KERNEL)))) {
+		WARN(1, "Failed to allocate CPU masks");
+		dest_cpu = 0;
+		state = fail;
+		goto out_nf;
+	}
+
+	if (is_mos_process(p)) {
+		dest_cpu = select_next_cpu_mos(p, p->cpus_ptr);
+		return dest_cpu;
+	}
 	/*
 	 * If the node that the CPU is on has been offlined, cpu_to_node()
 	 * will return -1. There is no CPU on the node, and we should
@@ -3558,6 +3599,14 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 
 		/* Look for allowed, online CPU in same node. */
 		for_each_cpu(dest_cpu, nodemask) {
+			if (!IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+				if (!cpu_active(dest_cpu))
+					continue;
+			} else {
+				if (!cpu_active(dest_cpu) && !is_mos_process(p))
+					continue;
+			}
+
 			if (is_cpu_allowed(p, dest_cpu))
 				return dest_cpu;
 		}
@@ -3565,11 +3614,27 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 
 	for (;;) {
 		/* Any allowed, online CPU? */
-		for_each_cpu(dest_cpu, p->cpus_ptr) {
-			if (!is_cpu_allowed(p, dest_cpu))
-				continue;
-
-			goto out;
+		if (!IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+			for_each_cpu(dest_cpu, p->cpus_ptr) {
+				if (!is_cpu_allowed(p, dest_cpu))
+					continue;
+				goto out;
+			}
+		} else {
+			cpumask_or(allowed, linux_cpus, p->cpus_ptr);
+			for_each_cpu(dest_cpu, allowed) {
+				if (!is_cpu_allowed(p, dest_cpu))
+					continue;
+				/* Exceptional kthreads allowed on LWKCPUs */
+				if (cpu_islwkcpu(dest_cpu) &&
+				    !(is_mos_process(p)) &&
+				    (strncmp(p->comm, "cpuhp", 5)) &&
+				    (strncmp(p->comm, "ksoftirqd", 9)) &&
+				    (strncmp(p->comm, "migration", 9)) &&
+				    (strncmp(p->comm, "mos_idle", 8)))
+					continue;
+				goto out;
+			}
 		}
 
 		/* No more Mr. Nice Guy. */
@@ -3587,7 +3652,15 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 			 *
 			 * More yuck to audit.
 			 */
-			do_set_cpus_allowed(p, task_cpu_possible_mask(p));
+			if (!is_mos_process(p)) {
+
+				/* Restrict non-LWK threads to Linux CPUs */
+				cpumask_andnot(linux_cpus,
+						cpu_possible_mask,
+						lwkcpus_mask_mos());
+			} else
+				do_set_cpus_allowed(p, task_cpu_possible_mask(p));
+
 			state = fail;
 			break;
 		case fail:
@@ -3597,6 +3670,11 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	}
 
 out:
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		free_cpumask_var(linux_cpus);
+		free_cpumask_var(allowed);
+	}
+out_nf:
 	if (state != cpuset) {
 		/*
 		 * Don't tell them about moving exiting tasks or
@@ -3625,6 +3703,10 @@ int select_task_rq(struct task_struct *p, int cpu, int wake_flags)
 	else
 		cpu = cpumask_any(p->cpus_ptr);
 
+	if (is_mos_process(p) && !is_assimilated_mos(p)) {
+		/* This is the wakeup of a newly created  mOS process */
+		cpu = select_cpu_candidate_mos(p, cpu);
+	}
 	/*
 	 * In order not to call set_task_cpu() on a blocking task we need
 	 * to rely on ttwu() to place the task on a valid ->cpus_ptr
@@ -3637,7 +3719,8 @@ int select_task_rq(struct task_struct *p, int cpu, int wake_flags)
 	 */
 	if (unlikely(!is_cpu_allowed(p, cpu)))
 		cpu = select_fallback_rq(task_cpu(p), p);
-
+	else if (!is_mos_process(p) &&  cpu_islwkcpu(cpu))
+		cpu = select_fallback_rq(task_cpu(p), p);
 	return cpu;
 }
 
@@ -4526,6 +4609,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.time_slice	= sched_rr_timeslice;
 	p->rt.on_rq		= 0;
 	p->rt.on_list		= 0;
+	init_fork_mos(p);
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -4775,6 +4859,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 	init_entity_runnable_average(&p->se);
 
+	if (is_mos_process(current)) {
+		set_sched_class_mos(p);
+		set_clone_flags_mos(p, clone_flags);
+	}
 
 #ifdef CONFIG_SCHED_INFO
 	if (likely(sched_info_on()))
@@ -6003,6 +6091,9 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	const struct sched_class *class;
 	struct task_struct *p;
 
+	if (is_lwkrq(rq))
+		goto restart;
+
 	/*
 	 * Optimization: we know that if all tasks are in the fair class we can
 	 * call that function directly, but only if the @prev task wasn't of a
@@ -7038,6 +7129,14 @@ EXPORT_SYMBOL(default_wake_function);
 
 static void __setscheduler_prio(struct task_struct *p, int prio)
 {
+	if (is_mos_sched_class(p)) {
+		/* Task is under the control of the mos scheduling
+		 * class, do not alter the class based on task priority.
+		 */
+		p->prio = prio;
+		return;
+	}
+
 	if (dl_prio(prio))
 		p->sched_class = &dl_sched_class;
 	else if (rt_prio(prio))
@@ -7091,6 +7190,18 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	 * If nothing changed; bail early.
 	 */
 	if (p->pi_top_task == pi_task && prio == p->prio && !dl_prio(prio))
+		return;
+
+	/*
+	 * If we are dealing with a mix of LWK and Linux tasks, bail early.
+	 * We do not support the complexity of elevating a Linux task into the
+	 * LWK scheduler and there is no reason to elevate an LWK task to a
+	 * Linux task since it is already running at a higher priority. Since
+	 * mOS tasks can have different priorities, we could support priority
+	 * adjustments when both tasks are mOS tasks, however at this time we do
+	 * not. We currently have no known users specifying explicit priority.
+	*/
+	if (is_mos_sched_class(p) || (pi_task && is_mos_sched_class(pi_task)))
 		return;
 
 	rq = __task_rq_lock(p, &rf);
@@ -8323,39 +8434,52 @@ __sched_setaffinity(struct task_struct *p, struct affinity_context *ctx)
 	ctx->new_mask = new_mask;
 	ctx->flags |= SCA_CHECK;
 
+        if (!is_mos_process(p)) {
+                cpuset_cpus_allowed(p, cpus_allowed);
+                cpumask_and(new_mask, ctx->new_mask, cpus_allowed);
+        } else {
+                /* Restrict allowed cpu targets to the lwk cpus */
+                set_to_lwkcpus_mos(cpus_allowed, p);
+                cpumask_and(new_mask, ctx->new_mask, cpus_allowed);
+                /* Is sched_setaffinity disabled for this mOS process */
+                if (is_setaffinity_disabled_mos(p, &retval))
+                        goto out_free_new_mask;
+                /* Bump the count of mOS setaffinity */
+                bump_setaffinity_count_mos();
+        }
+
 	retval = dl_task_check_affinity(p, new_mask);
 	if (retval)
 		goto out_free_new_mask;
 
 	retval = __set_cpus_allowed_ptr(p, ctx);
-	if (retval)
-		goto out_free_new_mask;
+	if (!retval && !is_mos_process(p)) {
+		cpuset_cpus_allowed(p, cpus_allowed);
+		if (!cpumask_subset(new_mask, cpus_allowed) && !is_mos_process(p)) {
+			/*
+			 * We must have raced with a concurrent cpuset update.
+			 * Just reset the cpumask to the cpuset's cpus_allowed.
+			 */
+			cpumask_copy(new_mask, cpus_allowed);
 
-	cpuset_cpus_allowed(p, cpus_allowed);
-	if (!cpumask_subset(new_mask, cpus_allowed)) {
-		/*
-		 * We must have raced with a concurrent cpuset update.
-		 * Just reset the cpumask to the cpuset's cpus_allowed.
-		 */
-		cpumask_copy(new_mask, cpus_allowed);
+			/*
+			 * If SCA_USER is set, a 2nd call to __set_cpus_allowed_ptr()
+			 * will restore the previous user_cpus_ptr value.
+			 *
+			 * In the unlikely event a previous user_cpus_ptr exists,
+			 * we need to further restrict the mask to what is allowed
+			 * by that old user_cpus_ptr.
+			 */
+			if (unlikely((ctx->flags & SCA_USER) && ctx->user_mask)) {
+				bool empty = !cpumask_and(new_mask, new_mask,
+							  ctx->user_mask);
 
-		/*
-		 * If SCA_USER is set, a 2nd call to __set_cpus_allowed_ptr()
-		 * will restore the previous user_cpus_ptr value.
-		 *
-		 * In the unlikely event a previous user_cpus_ptr exists,
-		 * we need to further restrict the mask to what is allowed
-		 * by that old user_cpus_ptr.
-		 */
-		if (unlikely((ctx->flags & SCA_USER) && ctx->user_mask)) {
-			bool empty = !cpumask_and(new_mask, new_mask,
-						  ctx->user_mask);
-
-			if (WARN_ON_ONCE(empty))
-				cpumask_copy(new_mask, cpus_allowed);
+				if (WARN_ON_ONCE(empty))
+					cpumask_copy(new_mask, cpus_allowed);
+			}
+			__set_cpus_allowed_ptr(p, ctx);
+			retval = -EINVAL;
 		}
-		__set_cpus_allowed_ptr(p, ctx);
-		retval = -EINVAL;
 	}
 
 out_free_new_mask:
@@ -8482,7 +8606,10 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 		goto out_unlock;
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
-	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
+	if (is_mos_process(p))
+		cpumask_and(mask, &p->cpus_mask, cpu_online_mask);
+	else
+		cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:
@@ -8555,6 +8682,9 @@ static void do_sched_yield(void)
  */
 SYSCALL_DEFINE0(sched_yield)
 {
+	if (is_lwkcpu() && list_is_singular(mos_runlist()))
+		return 0;
+
 	do_sched_yield();
 	return 0;
 }
@@ -9367,9 +9497,14 @@ int migrate_task_to(struct task_struct *p, int target_cpu)
 	if (curr_cpu == target_cpu)
 		return 0;
 
-	if (!cpumask_test_cpu(target_cpu, p->cpus_ptr))
-		return -EINVAL;
-
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		if (!cpumask_test_cpu(target_cpu, p->cpus_ptr) ||
+					!cpu_active(target_cpu))
+			return -EINVAL;
+	} else {
+		if (!cpumask_test_cpu(target_cpu, p->cpus_ptr))
+			return -EINVAL;
+	}
 	/* TODO: This is not properly updating schedstats */
 
 	trace_sched_move_numa(p, curr_cpu, target_cpu);
@@ -9920,10 +10055,16 @@ void __init sched_init(void)
 	BUG_ON(&idle_sched_class != &fair_sched_class + 1 ||
 	       &fair_sched_class != &rt_sched_class + 1 ||
 	       &rt_sched_class   != &dl_sched_class + 1);
+#ifdef CONFIG_MOS_FOR_HPC
+	BUG_ON(&dl_sched_class != &mos_sched_class + 1);
+#ifdef CONFIG_SMP
+	BUG_ON(&mos_sched_class != &stop_sched_class + 1);
+#endif
+#else
 #ifdef CONFIG_SMP
 	BUG_ON(&dl_sched_class != &stop_sched_class + 1);
 #endif
-
+#endif
 	wait_bit_init();
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -10092,6 +10233,8 @@ void __init sched_init(void)
 	balance_push_set(smp_processor_id(), false);
 #endif
 	init_sched_fair_class();
+
+	init_scheduler_mos();
 
 	psi_init();
 
