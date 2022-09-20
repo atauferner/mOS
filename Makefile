@@ -1099,6 +1099,7 @@ export MODORDER := $(extmod_prefix)modules.order
 export MODULES_NSDEPS := $(extmod_prefix)modules.nsdeps
 
 ifeq ($(KBUILD_EXTMOD),)
+core-y		:= mOS/
 
 build-dir	:= .
 clean-dirs	:= $(sort . Documentation \
