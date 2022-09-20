@@ -44,6 +44,8 @@
 
 #include "smpboot.h"
 
+#include <linux/mos.h>
+
 /**
  * struct cpuhp_cpu_state - Per cpu hotplug state storage
  * @state:	The current cpu state
@@ -122,6 +124,7 @@ static inline void cpuhp_lock_release(bool bringup) { }
  * @teardown:	Teardown function of the step
  * @cant_stop:	Bringup/teardown can't be stopped at this step
  * @multi_instance:	State has multiple instances which get added afterwards
+ * @lwkcpu_state: Valid state step if used as an LWK CPU
  */
 struct cpuhp_step {
 	const char		*name;
@@ -140,6 +143,9 @@ struct cpuhp_step {
 	/* public: */
 	bool			cant_stop;
 	bool			multi_instance;
+#ifdef CONFIG_MOS_FOR_HPC
+	bool			lwkcpu_state;
+#endif
 };
 
 static DEFINE_MUTEX(cpuhp_state_mutex);
@@ -176,6 +182,17 @@ static int cpuhp_invoke_callback(unsigned int cpu, enum cpuhp_state state,
 	int (*cbm)(unsigned int cpu, struct hlist_node *node);
 	int (*cb)(unsigned int cpu);
 	int ret, cnt;
+
+#ifdef CONFIG_MOS_FOR_HPC
+	/*
+	 * On LWK CPUs we execute only LWK CPU states, for other states
+	 * we just return success.
+	 */
+	if (cpu_islwkcpu(cpu)) {
+		if (!step->lwkcpu_state)
+			return 0;
+	}
+#endif
 
 	if (st->fail == state) {
 		st->fail = CPUHP_INVALID;
@@ -1513,7 +1530,7 @@ static int cpu_down_maps_locked(unsigned int cpu, enum cpuhp_state target)
 	return -EBUSY;
 }
 
-static int cpu_down(unsigned int cpu, enum cpuhp_state target)
+int do_cpu_down(unsigned int cpu, enum cpuhp_state target)
 {
 	int err;
 
@@ -1521,6 +1538,16 @@ static int cpu_down(unsigned int cpu, enum cpuhp_state target)
 	err = cpu_down_maps_locked(cpu, target);
 	cpu_maps_update_done();
 	return err;
+}
+
+int cpu_down(unsigned int cpu, enum cpuhp_state target)
+{
+	if (cpu_islwkcpu(cpu)) {
+		pr_err("%s: (!) CPU %d is in LWK partition\n", __func__, cpu);
+		return -EINVAL;
+	}
+
+	return do_cpu_down(cpu, target);
 }
 
 /**
@@ -1709,7 +1736,7 @@ out:
 	return ret;
 }
 
-static int cpu_up(unsigned int cpu, enum cpuhp_state target)
+int do_cpu_up(unsigned int cpu, enum cpuhp_state target)
 {
 	int err = 0;
 
@@ -1741,6 +1768,16 @@ static int cpu_up(unsigned int cpu, enum cpuhp_state target)
 out:
 	cpu_maps_update_done();
 	return err;
+}
+
+int cpu_up(unsigned int cpu, enum cpuhp_state target)
+{
+	if (cpu_islwkcpu(cpu)) {
+		pr_err("%s: (!) CPU %d is in LWK partition\n", __func__, cpu);
+		return -EINVAL;
+	}
+
+	return do_cpu_up(cpu, target);
 }
 
 /**
@@ -1799,6 +1836,10 @@ static void __init cpuhp_bringup_mask(const struct cpumask *mask, unsigned int n
 				      enum cpuhp_state target)
 {
 	unsigned int cpu;
+	bool no_lwkcpus = true;
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC))
+		no_lwkcpus = cpumask_empty(mos_lwkcpus_arg);
 
 	for_each_cpu(cpu, mask) {
 		struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
@@ -2750,6 +2791,11 @@ static ssize_t target_store(struct device *dev, struct device_attribute *attr,
 	if (target != CPUHP_OFFLINE && target != CPUHP_ONLINE)
 		return -EINVAL;
 #endif
+	if (cpu_islwkcpu(dev->id)) {
+		pr_err("%s: (!) CPU %d is in LWK partition\n",
+			__func__, dev->id);
+		return -EINVAL;
+	}
 
 	ret = lock_device_hotplug_sysfs();
 	if (ret)
@@ -2866,7 +2912,13 @@ static ssize_t states_show(struct device *dev,
 		struct cpuhp_step *sp = cpuhp_get_step(i);
 
 		if (sp->name) {
+#ifdef CONFIG_MOS_FOR_HPC
+			char *l = sp->lwkcpu_state ? "LWK" : "";
+
+			cur = sprintf(buf, "%3d: %3s %s\n", i, l, sp->name);
+#else
 			cur = sprintf(buf, "%3d: %s\n", i, sp->name);
+#endif
 			buf += cur;
 			res += cur;
 		}
@@ -3185,3 +3237,43 @@ bool cpu_mitigations_auto_nosmt(void)
 	return cpu_mitigations == CPU_MITIGATIONS_AUTO_NOSMT;
 }
 EXPORT_SYMBOL_GPL(cpu_mitigations_auto_nosmt);
+#ifdef CONFIG_MOS_FOR_HPC
+
+/*
+ * Checks if a given CPU hotplug state is marked as LWK CPU state
+ * or not.
+ *
+ * @state,  CPU hotplug state that needs to be tested
+ * @return, true  if @state is marked as LWK CPU state
+ *          false otherwise
+ */
+bool is_lwkcpu_state(enum cpuhp_state state)
+{
+	bool ret;
+
+	mutex_lock(&cpuhp_state_mutex);
+	ret = cpuhp_get_step(state)->lwkcpu_state;
+	mutex_unlock(&cpuhp_state_mutex);
+	return ret;
+}
+EXPORT_SYMBOL(is_lwkcpu_state);
+
+/*
+ * Mark or Unmark a CPU hotplug state as LWK CPU state
+ *
+ * @state,  CPU hotplug state that needs to be marked
+ * @val,    true if @state needs to be marked as LWK CPU state
+ *          false if @statte needs to be unmarked
+ * @return, none
+ */
+void lwkcpu_set_state(enum cpuhp_state state, bool val)
+{
+	struct cpuhp_step *step;
+
+	mutex_lock(&cpuhp_state_mutex);
+	step = cpuhp_get_step(state);
+	step->lwkcpu_state = val;
+	mutex_unlock(&cpuhp_state_mutex);
+}
+EXPORT_SYMBOL(lwkcpu_set_state);
+#endif
