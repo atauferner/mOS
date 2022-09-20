@@ -6401,6 +6401,19 @@ static const struct kernel_param_ops wq_affn_dfl_ops = {
 
 module_param_cb(default_affinity_scope, &wq_affn_dfl_ops, NULL, 0644);
 
+#ifdef CONFIG_MOS_FOR_HPC
+cpumask_t *workqueue_get_unbound_cpumask(void)
+{
+	mutex_lock(&wq_pool_mutex);
+	return wq_unbound_cpumask;
+}
+
+void workqueue_put_unbound_cpumask(void)
+{
+	mutex_unlock(&wq_pool_mutex);
+}
+#endif
+
 #ifdef CONFIG_SYSFS
 /*
  * Workqueues with WQ_SYSFS flag set is visible to userland via
@@ -6669,7 +6682,7 @@ static struct bus_type wq_subsys = {
  *		-EINVAL	- Invalid @cpumask
  *		-ENOMEM	- Failed to allocate memory for attrs or pwqs.
  */
-static int workqueue_set_unbound_cpumask(cpumask_var_t cpumask)
+int workqueue_set_unbound_cpumask(cpumask_var_t cpumask)
 {
 	int ret = -EINVAL;
 
