@@ -1586,6 +1586,15 @@ endif
 	@cp -f modules.builtin $(MODLIB)/
 	@cp -f $(objtree)/modules.builtin.modinfo $(MODLIB)/
 
+ifeq ($(CONFIG_MOS_FOR_HPC), y)
+PHONY += _toolinst_
+modules_install: _toolinst_
+_toolinst_:
+	$(Q)$(MAKE) $(build)=mOS/tools $@
+endif
+
+endif # CONFIG_MODULES
+
 ###
 # Cleaning is done on three levels.
 # make clean     Delete most generated files
