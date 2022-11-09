@@ -46,6 +46,31 @@ This package provides kernel headers and makefiles sufficient to build modules
 against the %{version} kernel package.
 %endif
 
+%if %{with_mos}
+%package mOS
+Summary: Tools package for Linux/mOS $__KERNELRELEASE kernel
+Group: System Environment/Kernel
+AutoReqProv: no
+%description -n kernel-mOS
+This package provides tools necessary to use mOS features in
+the $__KERNELRELEASE kernel package.
+
+%post mOS
+ldconfig
+ln -fs libmos.so.1 /usr/lib/libmos.so
+ln -fs libxpmem.so.0 /usr/lib/libxpmem.so
+
+%files mOS
+%defattr (-, root, root)
+/usr/lib/libmos*
+/usr/lib/libxpmem*
+/usr/include/mos.h
+/usr/include/uti.h
+/usr/include/xpmem.h
+/usr/share/man/man1/*
+/usr/share/man/man2/*
+%endif
+
 %prep
 %setup -q -n linux
 cp %{SOURCE1} .config
@@ -95,6 +120,10 @@ fi
 %defattr (-, root, root)
 /lib/modules/%{KERNELRELEASE}
 %exclude /lib/modules/%{KERNELRELEASE}/build
+%if %{with_mos}
+/usr/bin/*
+/etc/udev/rules.d/*
+%endif
 
 %files headers
 %defattr (-, root, root)

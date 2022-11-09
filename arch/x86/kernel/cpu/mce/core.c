@@ -2432,8 +2432,6 @@ static void mce_enable_ce(void *all)
 }
 
 #ifdef CONFIG_MOS_FOR_HPC
-void cmci_set_threshold(void *thresh);
-void cmci_reset_threshold(void *data);
 
 /*
  * When an LWK process is launched, this function will be called with a cpumask
@@ -2457,10 +2455,6 @@ void mce_lwkprocess_begin(cpumask_t *lwkcpus, unsigned int threshold,
 	if (!threshold)
 		/* Disable CMCI on each of the CPUs in the mask */
 		on_each_cpu_mask(lwkcpus, mce_disable_cmci, NULL, 1);
-	else
-		/* Set the threshold into the MSRs of the lwkcpus */
-		on_each_cpu_mask(lwkcpus, cmci_set_threshold,
-					(void *)((u64)threshold), 1);
 }
 /*
  * When an LWK process exits, this function will be called with a cpumask
@@ -2477,10 +2471,7 @@ void mce_lwkprocess_end(cpumask_t *lwkcpus, bool reset_threshold,
 		return;
 	if (mca_cfg.ignore_ce == true)
 		return;
-	if (reset_threshold)
-		on_each_cpu_mask(lwkcpus, cmci_reset_threshold, NULL, 1);
-	else
-		on_each_cpu_mask(lwkcpus, mce_enable_ce, (void *)reenable_poll,
+	on_each_cpu_mask(lwkcpus, mce_enable_ce, (void *)reenable_poll,
 					1);
 }
 #endif

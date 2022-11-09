@@ -18,6 +18,7 @@
 
 /* Private headers */
 #include "lwk_mm_private.h"
+#include "../mm/internal.h"
 
 #define LWKPG_SPLIT_PMD_FLAGS (_PAGE_DIRTY | _PAGE_ACCESSED | _PAGE_RW)
 #define LWKPG_SPLIT_PUD_FLAGS (LWKPG_SPLIT_PMD_FLAGS)
@@ -125,7 +126,7 @@ void lwk_mm_split_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		atomic_set(&page->_mapcount, 0);
 		entry = mk_pte(page + i, pgprot);
 		entry = pte_clear_flags(entry, LWKPG_CLR_FLAGS);
-		entry = pte_mkwrite(entry);
+		entry = pte_mkwrite(entry, vma);
 		entry = dirty ? pte_mkdirty(entry) : pte_mkclean(entry);
 		entry = young ? pte_mkyoung(entry) : pte_mkold(entry);
 		set_pte_at(mm, addr, pte + i, entry);
@@ -206,7 +207,7 @@ void lwk_mm_split_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 
 	for (i = 0, addr = start; i < npmds; i++, addr += PMD_SIZE) {
 		clear_compound_head(page);
-		set_compound_order(page, order);
+		folio_set_order(page_folio(page), order);
 		__SetPageHead(page);
 		page->mapping = mapping;
 		page->index = linear_page_index(vma, addr);
@@ -220,7 +221,7 @@ void lwk_mm_split_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 
 		entry = mk_pmd(page, pgprot);
 		entry = pmd_clear_flags(entry, LWKPG_CLR_FLAGS);
-		entry = pmd_mkwrite(entry);
+		entry = pmd_mkwrite(entry, vma);
 		entry = pmd_mkhuge(entry);
 		entry = dirty ? pmd_mkdirty(entry) : pmd_mkclean(entry);
 		entry = young ? pmd_mkyoung(entry) : pmd_mkold(entry);
@@ -393,7 +394,7 @@ int lwk_mm_map_pte(pmd_t *pmd, struct vm_area_struct *vma, unsigned long start,
 			lwkpage_add_rmap(page, vma, addr);
 			entry = mk_pte(page, vma->vm_page_prot);
 			entry = pte_clear_flags(entry, LWKPG_CLR_FLAGS);
-			entry = pte_mkwrite(entry);
+			entry = pte_mkwrite(entry, vma);
 			set_pte_at(mm, addr, pte, entry);
 		}
 	} while (pte++, addr += PAGE_SIZE, addr != end);
@@ -439,7 +440,7 @@ int lwk_mm_map_pmd(pud_t *pud, struct vm_area_struct *vma, unsigned long start,
 				lwkpage_add_rmap(page, vma, addr);
 				entry = mk_pmd(page, vma->vm_page_prot);
 				entry = pmd_clear_flags(entry, LWKPG_CLR_FLAGS);
-				entry = pmd_mkwrite(entry);
+				entry = pmd_mkwrite(entry, vma);
 				entry = pmd_mkhuge(entry);
 				set_pmd_at(vma->vm_mm, addr, pmd, entry);
 			}

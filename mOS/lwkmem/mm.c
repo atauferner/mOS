@@ -353,7 +353,7 @@ static int lwk_mm_fork(struct vm_area_struct *old_vma,
 
 	for (addr = old_vma->vm_start; addr < end; addr += PAGE_SIZE) {
 		/* Get the old page from parent process i.e. caller */
-		ret = get_user_pages(addr, 1, 0, &src_page, NULL);
+		ret = get_user_pages(addr, 1, 0, &src_page);
 
 		if (ret == 0)
 			continue;
@@ -383,7 +383,7 @@ static int lwk_mm_fork(struct vm_area_struct *old_vma,
 		 */
 		ret = get_user_pages_remote(new_vma->vm_mm, addr, 1,
 					    FOLL_WRITE,
-					    &dst_page, NULL, NULL);
+					    &dst_page, NULL);
 		if (ret <= 0) {
 			LWKMEM_ERROR("Could not get dst page at: %#lx rc %ld",
 				     addr, ret);

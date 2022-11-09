@@ -1468,6 +1468,13 @@ modules: modules_prepare
 modules_prepare: prepare
 	$(Q)$(MAKE) $(build)=scripts scripts/module.lds
 
+ifeq ($(CONFIG_MOS_FOR_HPC), y)
+PHONY += _toolinst_
+modules_install: _toolinst_
+_toolinst_:
+	$(Q)$(MAKE) $(build)=mOS/tools $@
+endif
+
 endif # CONFIG_MODULES
 
 ###

@@ -2743,7 +2743,7 @@ void lwkpage_add_rmap(struct page *page, struct vm_area_struct *vma,
 		atomic_set(&folio->_entire_mapcount, 0);
 	else
 		atomic_set(&page->_mapcount, 0);
-	__page_set_anon_rmap(folio, page, vma, address, 1);
+	__folio_set_anon(folio, vma, address, 1);
 }
 
 void lwkpage_remove_rmap(struct page *page)

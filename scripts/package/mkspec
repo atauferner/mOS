@@ -20,6 +20,11 @@ echo '%define with_devel %{?_without_devel: 0} %{?!_without_devel: 1}'
 else
 echo '%define with_devel 0'
 fi
+if  grep -q CONFIG_MOS_FOR_HPC=y .config; then
+echo '%define with_mos 1'
+else
+echo '%define with_mos 0'
+fi
 
 cat<<EOF
 %define ARCH ${ARCH}

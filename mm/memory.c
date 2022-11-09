@@ -79,7 +79,6 @@
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
 
-#include <linux/net_mm.h>
 #include <linux/mos.h>
 
 #include <trace/events/kmem.h>

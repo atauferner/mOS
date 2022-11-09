@@ -3116,7 +3116,7 @@ static void update_curr_mos(struct rq *rq)
 		return;
 
 	schedstat_set(curr->stats.exec_max,
-		      max(curr->stats.exec_max, delta_exec));
+		      max(curr->stats.exec_max, (s64) delta_exec));
 
 	curr->se.prev_sum_exec_runtime = curr->se.sum_exec_runtime;
 
@@ -3634,7 +3634,7 @@ const struct sched_class mos_sched_class
 	.enqueue_task		= enqueue_task_mos,
 	.dequeue_task		= dequeue_task_mos,
 	.yield_task		= yield_task_mos,
-	.check_preempt_curr	= check_preempt_curr_mos,
+	.wakeup_preempt		= check_preempt_curr_mos,
 	.pick_next_task		= pick_next_task_mos,
 	.put_prev_task		= put_prev_task_mos,
 
