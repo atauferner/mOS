@@ -774,9 +774,9 @@ static inline bool is_mergeable_vma(struct vm_area_struct *vma,
 		struct vm_userfaultfd_ctx vm_userfaultfd_ctx,
 		struct anon_vma_name *anon_name, bool may_remove_vma)
 {
-	if (vma->vm_flags & VM_LWK_HEAP)
-	 ignore |= VM_MIXEDMAP;
-
+	if ((vma->vm_flags & VM_LWK_HEAP) &&
+	    ((vma->vm_flags ^ vm_flags) & ~VM_MIXEDMAP))
+		return false;
 	/*
 	 * VM_SOFTDIRTY should not prevent from VMA merging, if we
 	 * match the flags but dirty bit -- the caller should mark
@@ -1430,10 +1430,23 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 			if (is_lwkmem_enabled(current)) {
 				if (flags & (MAP_STACK | MAP_NORESERVE)) {
-					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK))
+					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK)) {
+						struct lwk_pma_meminfo meminfo;
+						struct lwk_mm *lwkmm = curr_lwk_mm();
+
+						if ((flags & MAP_NORESERVE) && lwkmm) {
+							lwkmm->pm_ops->meminfo(lwkmm->pma, NUMA_NO_NODE, &meminfo);
+							/* Need to improve handling of massive
+							 * MAP_NORESERVED map requests
+							 * For now, defer to Linux
+							 */
+							if (len >= (meminfo.free_pages * PAGE_SIZE))
+								break;
+						}
 						vm_flags |= VM_LWK_TSTACK |
-							    VM_LWK |
-							    VM_LWK_EXTRA;
+						VM_LWK |
+						VM_LWK_EXTRA;
+					}
 					break;
 				}
 
