@@ -774,6 +774,9 @@ static inline bool is_mergeable_vma(struct vm_area_struct *vma,
 		struct vm_userfaultfd_ctx vm_userfaultfd_ctx,
 		struct anon_vma_name *anon_name, bool may_remove_vma)
 {
+	if (vma->vm_flags & VM_LWK_HEAP)
+	 ignore |= VM_MIXEDMAP;
+
 	/*
 	 * VM_SOFTDIRTY should not prevent from VMA merging, if we
 	 * match the flags but dirty bit -- the caller should mark
