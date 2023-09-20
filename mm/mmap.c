@@ -1444,6 +1444,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 			if (is_lwkmem_enabled(current)) {
 				if (flags & (MAP_STACK | MAP_NORESERVE)) {
+#ifdef CONFIG_MOS_LWKMEM
 					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK)) {
 						struct lwk_pma_meminfo meminfo;
 						struct lwk_mm *lwkmm = curr_lwk_mm();
@@ -1461,6 +1462,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 						VM_LWK |
 						VM_LWK_EXTRA;
 					}
+#endif
 					break;
 				}
 

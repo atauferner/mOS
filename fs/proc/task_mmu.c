@@ -328,6 +328,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 			goto done;
 		}
 
+#ifdef CONFIG_MOS_LWKMEM
 		if (is_lwkvma(vma)) {
 			if (vma->vm_flags & VM_LWK_STACK)
 				name = "[stack] [LWK]";
@@ -343,6 +344,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 				name = "[unknown] [LWK]";
 			goto done;
 		}
+#endif
 
 		if (vma->vm_start <= mm->brk &&
 		    vma->vm_end >= mm->start_brk) {
@@ -634,6 +636,7 @@ static void smaps_pmd_entry(pmd_t *pmd, unsigned long addr,
 }
 #endif
 
+#ifdef CONFIG_MOS_LWKMEM
 static void smaps_lwk_pud_entry(pud_t *pud, unsigned long addr,
 		struct mm_walk *walk)
 {
@@ -645,7 +648,8 @@ static void smaps_lwk_pud_entry(pud_t *pud, unsigned long addr,
 	page = pud_page(*pud);
 	if (PageAnon(page))
 		mss->anonymous_thp += HPAGE_PUD_SIZE;
-	smaps_account(mss, page, true, pud_young(*pud), pud_dirty(*pud), locked, false);
+	panic(__func__);
+	//smaps_account(mss, page, true, pud_young(*pud), pud_dirty(*pud), locked, false);
 }
 
 static void smaps_lwk_pmd_entry(pmd_t *pmd, unsigned long addr,
@@ -662,6 +666,8 @@ static void smaps_lwk_pmd_entry(pmd_t *pmd, unsigned long addr,
 	smaps_account(mss, page, true, pmd_young(*pmd), pmd_dirty(*pmd), locked, false);
 }
 
+#endif
+
 static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 			   struct mm_walk *walk)
 {
@@ -669,15 +675,20 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	pte_t *pte;
 	spinlock_t *ptl;
 
+#ifdef CONFIG_MOS_LWKMEM
 	if (is_lwkvma(vma)) {
 		ptl = pmd_lock(walk->mm, pmd);
+		panic(__func__);
+#if 0
 		if (pmd_present(*pmd) && (pmd_flags(*pmd) & _PAGE_PSE)) {
 			smaps_lwk_pmd_entry(pmd, addr, walk);
 			walk->action = ACTION_CONTINUE;
 		}
+		#endif
 		spin_unlock(ptl);
 		goto out;
 	}
+#endif
 	ptl = pmd_trans_huge_lock(pmd, vma);
 	if (ptl) {
 		smaps_pmd_entry(pmd, addr, walk);
@@ -706,14 +717,19 @@ static int smaps_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 {
 	spinlock_t *ptl;
 
+#ifdef CONFIG_MOS_LWKMEM
 	if (is_lwkvma(walk->vma)) {
 		ptl = pud_lock(walk->mm, pud);
+		panic(__func__);
+#if 0
 		if (pud_present(*pud) && (pud_flags(*pud) & _PAGE_PSE)) {
 			smaps_lwk_pud_entry(pud, addr, walk);
 			walk->action = ACTION_CONTINUE;
 		}
+#endif
 		spin_unlock(ptl);
 	}
+#endif
 	return 0;
 }
 

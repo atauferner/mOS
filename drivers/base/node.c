@@ -42,11 +42,13 @@ static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
 
 	cpumask_and(mask, cpumask_of_node(node_dev->dev.id), cpu_online_mask);
 
+#ifdef CONFIG_MOS_FOR_HPC
 	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
 		n = cpumap_print_mos_bitmap_to_buf(buf, mask, off, count);
 		free_cpumask_var(mask);
 		return n;
 	}
+#endif
 	n = cpumap_print_bitmask_to_buf(buf, mask, off, count);
 
 	free_cpumask_var(mask);
@@ -69,11 +71,13 @@ static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
 
 	cpumask_and(mask, cpumask_of_node(node_dev->dev.id), cpu_online_mask);
 
+#ifdef CONFIG_MOS_FOR_HPC
 	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
 		n = cpumap_print_mos_list_to_buf(buf, mask, off, count);
 		free_cpumask_var(mask);
 		return n;
 	}
+#endif
 
 	n = cpumap_print_list_to_buf(buf, mask, off, count);
 	free_cpumask_var(mask);

@@ -27,7 +27,7 @@
 /* Global LWK page attributes */
 struct lwkpage_attributes lwkpage_attrs[LWK_MAX_NUMPGTYPES] = {
 	[LWK_PG_4K] = { "4k", 0, SZ_4K },
-#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE) || defined(CONFIG_RISCV)
 	[LWK_PG_2M] = { "2m", 9, SZ_2M },
 #else
 	[LWK_PG_4M] = { "4m", 10, SZ_4M },
@@ -1099,7 +1099,9 @@ int start_lwk_mm(void)
 		lwk_mm->active = false;
 	} else {
 		/* Don't randomize address space for LWK processes! */
+#ifdef CONFIG_X86_64	
 		current->personality |= ADDR_NO_RANDOMIZE;
+#endif
 		lwk_mm->active = true;
 	}
 out:

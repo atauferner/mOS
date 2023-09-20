@@ -654,7 +654,11 @@ static unsigned long allocate_memory_from_linux(int nid, unsigned long size)
 				nid);
 			break;
 		}
+#ifdef CONFIG_X86_64	 
 		curr->base = pfn_to_kaddr(pfn);
+#else
+		panic("need pfn_to_kaddr");
+#endif
 		curr->owner = -1;
 		curr->length = block_size;
 		list_add_tail(&curr->list_designated, &granules);

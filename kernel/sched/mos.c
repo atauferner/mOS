@@ -47,11 +47,6 @@
 #include <linux/sched/clock.h>
 #include <linux/syscalls.h>
 #include <asm/types.h>
-#include <asm/mce.h>
-#include <asm/cpu_device_id.h>
-#include <asm/intel-family.h>
-#include <asm/mwait.h>
-#include <asm/msr.h>
 #include <uapi/linux/sched/types.h>
 
 
@@ -209,7 +204,7 @@ static void sched_stats_prepare_launch(struct mos_sched_stats *stats)
 	stats->balance_from = 0;
 }
 
-
+#ifdef CONFIG_X86_64
 static void probe_mwait_capabilities(void)
 {
 	unsigned int eax, ebx, ecx;
@@ -260,6 +255,10 @@ static void probe_mwait_capabilities(void)
 					   deep_sleep_mwait, ecx,
 					   mwait_substates);
 }
+#else
+static void probe_mwait_capabilities(void){
+}
+#endif
 
 static void init_mos_topology(struct rq *rq)
 {
@@ -1673,6 +1672,7 @@ unlock:
 
 static inline void mos_idle_poll_halt_wait(struct mos_rq *mos_rq, int cpu)
 {
+#ifdef CONFIG_X86_64
 	unsigned long ecx, eax;
 	bool deep_sleep = false;
 
@@ -1729,7 +1729,9 @@ static inline void mos_idle_poll_halt_wait(struct mos_rq *mos_rq, int cpu)
 		start_critical_timings();
 		trace_mos_idle_poll_exit(0);
 	}
+#endif
 	ct_cpuidle_exit();
+
 }
 
 /*
@@ -2932,7 +2934,9 @@ SYSCALL_DEFINE4(mos_mwait,
 	else if (likely(now == previous)) {
 		for (;;) {
 			if (user_access_begin(loc, 64)) {
+#ifdef CONFIG_X86_64
 				__monitor((void *)loc, 0, 0);
+#endif
 				user_access_end();
 				/* Must re-test after monitor is set */
 				if (unlikely(__get_user(now, loc))) {
@@ -2941,7 +2945,9 @@ SYSCALL_DEFINE4(mos_mwait,
 				}
 				if (likely(now == previous)) {
 					trace_mos_mwait_api_entry(ecx, eax);
+#ifdef CONFIG_X86_64
 					__mwait(eax, ecx);
+#endif
 					rc++;
 					trace_mos_mwait_api_exit(ecx, eax);
 					if (unlikely(__get_user(now, loc))) {

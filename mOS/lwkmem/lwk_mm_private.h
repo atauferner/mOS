@@ -69,8 +69,16 @@ extern void lwkmem_page_deinit(struct page *p);
  *
  * LWK pages are RWE by default so clear _PAGE_NX
  */
+#ifdef CONFIG_X86_64
 #define LWKPG_CLR_FLAGS	(_PAGE_PWT | _PAGE_PCD | _PAGE_NX | \
 			 _PAGE_DIRTY | _PAGE_SOFT_DIRTY | _PAGE_PSE)
+#define lwk_huge_pmd(pmd)	((pmd_val(*pmd) & _PAGE_PSE) != 0)
+#define lwk_huge_pud(pud)	((pud_val(*pud) & _PAGE_PSE) != 0)
+#else
+#define LWKPG_CLR_FLAGS	0
+#define lwk_huge_pmd(pmd)	((pmd_val(*pmd) & 1) != 0)
+#define lwk_huge_pud(pud)	((pud_val(*pud) & 1) != 0)
+#endif
 
 /* Till Linux define this macro for PUD level we cover it here. */
 #ifndef mk_pud
@@ -78,8 +86,6 @@ extern void lwkmem_page_deinit(struct page *p);
 #endif
 #define lwkpage_pud_page(k)	((k) == LWK_PG_1G)
 #define lwkpage_pmd_page(k)	((k) == LWK_PG_2M)
-#define lwk_huge_pmd(pmd)	((pmd_val(*pmd) & _PAGE_PSE) != 0)
-#define lwk_huge_pud(pud)	((pud_val(*pud) & _PAGE_PSE) != 0)
 
 #define lwkpage_desc(t)		lwkpage_attrs[t].desc
 #define lwkpage_size(t) 	lwkpage_attrs[t].size

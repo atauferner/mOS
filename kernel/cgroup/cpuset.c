@@ -3843,7 +3843,9 @@ void cpuset_cpus_allowed(struct task_struct *tsk, struct cpumask *pmask)
 	rcu_read_lock();
 
         if (is_lwk_process(tsk)) {
+#ifdef CONFIG_MOS_LWKMEM
 		cpumask_copy(pmask, tsk->mos_process->lwkcpus);
+#endif
 		goto out;
         }
 

@@ -110,8 +110,10 @@ static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list,
 	mask = cpumask_of_pcibus(to_pci_dev(dev)->bus);
 #endif
 
+#ifdef CONFIG_MOS_FOR_HPC
 	if (IS_ENABLED(CONFIG_MOS_FOR_HPC))
 		return cpumap_print_mos_view_cpumask(list, buf, mask);
+#endif
 
 	return cpumap_print_to_pagebuf(list, buf, mask);
 }

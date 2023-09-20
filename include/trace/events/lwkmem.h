@@ -667,7 +667,7 @@ static char *lwk_pgtype(enum lwk_page_type pgtype)
 {
 	switch (pgtype) {
 	case LWK_PG_4K: return "4k";
-#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE) || defined(CONFIG_RISCV)
 	case LWK_PG_2M: return "2m";
 #else
 	case LWK_PG_4M: return "4m";

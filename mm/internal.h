@@ -397,9 +397,11 @@ static inline void prep_compound_tail(struct page *head, int tail_idx)
 
 	p->mapping = TAIL_MAPPING;
 	set_compound_head(p, head);
+#ifdef CONFIG_MOS_LWKMEM
 	if (is_lwkpg(p))
 		set_page_private(p, _LWKPG);
 	else
+#endif
 		set_page_private(p, 0);
 }
 

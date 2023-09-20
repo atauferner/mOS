@@ -14,8 +14,8 @@
 # mOS Configuration
 #
 
-comment "X86_64 required for mOS"
-	depends on !X86_64
+comment "X86_64 or RISCV required for mOS"
+	depends on !X86_64 && !RISCV
 
 comment "SMP required for mOS"
 	depends on !SMP
@@ -31,7 +31,7 @@ comment "ARCH_USES_HIGH_VMA_FLAGS required for mOS"
 
 menuconfig MOS_FOR_HPC
 	bool "mOS hybrid FWK/LWK for HPC"
-	depends on X86_64 && SMP && NUMA && HOTPLUG_CPU && ARCH_USES_HIGH_VMA_FLAGS
+	depends on SMP && NUMA && HOTPLUG_CPU && ARCH_USES_HIGH_VMA_FLAGS
 	help
 	  Build as mOS (short for "multi-O/S"), an experimental kernel
 	  for supercomputers which attempts to create a hybrid between a
