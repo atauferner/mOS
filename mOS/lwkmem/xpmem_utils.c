@@ -1182,7 +1182,7 @@ struct vm_area_struct *create_lwkxpmem_vma(struct mm_struct *src_mm,
 				 * only requesting 1 page.
 				 */
 				get_user_pages_remote(src_mm,
-				    vma->vm_start, 1, FOLL_FORCE, NULL, NULL,
+				    vma->vm_start, 1, FOLL_FORCE, NULL,
 				    &lock);
 
 				page = user_to_page(src_mm, src_start, &size);

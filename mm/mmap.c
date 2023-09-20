@@ -249,6 +249,10 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		 * before calling do_vma_munmap().
 		 */
 		mm->brk = brk;
+
+		if (is_lwkmem_enabled(current) && !is_lwkvmr_disabled(LWK_VMR_HEAP))
+			goto success;
+
 		if (do_vma_munmap(&vmi, brkvma, newbrk, oldbrk, &uf, true))
 			goto out;
 
@@ -258,14 +262,9 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	if (check_brk_limits(oldbrk, newbrk - oldbrk))
 		goto out;
 
-	/*
-	 * Only check if the next VMA is within the stack_guard_gap of the
-	 * expansion area
-	 */
-	vma_iter_init(&vmi, mm, oldbrk);
-
 	if (is_lwkmem_enabled(current) && !is_lwkvmr_disabled(LWK_VMR_HEAP)) {
-		next = find_vma(mm, oldbrk);
+		vma_iter_init(&vmi, mm, oldbrk);
+		next = brkvma = vma_find(&vmi, newbrk);
 
 		/*
 		 * VMA corresponding to the heap already exists that overlaps
@@ -277,16 +276,17 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 			 * if yes then expand pre-existing VMA's end.
 			 */
 			if (newbrk > next->vm_end) {
-				struct vm_area_struct *next_vm_next = vma_next(&vmi);
+				struct vm_area_struct *next_next = vma_next(&vmi);
 
 				/* Overflow? */
-				if (next_vm_next &&
+				if (next_next &&
 				    (newbrk + PAGE_SIZE >
-				    vm_start_gap(next_vm_next)))
+				    vm_start_gap(next_next)))
 					goto out;
-				if (do_brk_flags(&vmi, next, next->vm_end,
-					newbrk - next->vm_end,
-					VM_LWK | VM_LWK_HEAP | VM_LWK_EXTRA))
+				brkvma = vma_prev_limit(&vmi, mm->start_brk);
+				if (do_brk_flags(&vmi, brkvma, brkvma->vm_end,
+					newbrk - brkvma->vm_end,
+					VM_LWK | VM_LWK_HEAP | VM_LWK_EXTRA) < 0)
 					goto out;
 			}
 		} else {
@@ -294,9 +294,11 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 			if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
 				goto out;
 
-			if (do_brk_flags(&vmi, next, oldbrk, newbrk-oldbrk,
+			brkvma = vma_prev_limit(&vmi, mm->start_brk);
+			if (do_brk_flags(&vmi, brkvma, oldbrk, newbrk-oldbrk,
 				VM_LWK | VM_LWK_HEAP | VM_LWK_EXTRA) < 0)
 				goto out;
+			brkvma = find_vma(mm, oldbrk);
 		}
 
 		/*
@@ -305,16 +307,21 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		 * if @newbrk was within pre-existing VMA for heap then
 		 * it's vm_end would not define the current end of heap.
 		 */
-		if (!next || !is_lwkvma(next)) {
-			LWKMEM_ERROR("Not a LWK VMA for heap");
+		if (!brkvma || !is_lwkvma(brkvma)) {
+			LWKMEM_ERROR("0x%p is not an LWK VMA for heap", brkvma);
 			goto out;
 		}
-		lwkmem_clear_heap(next, oldbrk, newbrk);
+		lwkmem_clear_heap(brkvma, oldbrk, newbrk);
 		mm->brk = brk;
 		goto success;
 	}
 
-	next = vma_find(&vmi, newbrk + PAGE_SIZE + stack_guard_gap);
+        /*
+         * Only check if the next VMA is within the stack_guard_gap of the
+         * expansion area
+         */
+        vma_iter_init(&vmi, mm, oldbrk);
+        next = vma_find(&vmi, newbrk + PAGE_SIZE + stack_guard_gap);
 	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
 		goto out;
 
@@ -795,9 +802,11 @@ static inline bool is_mergeable_vma(struct vm_area_struct *vma,
 		struct vm_userfaultfd_ctx vm_userfaultfd_ctx,
 		struct anon_vma_name *anon_name, bool may_remove_vma)
 {
-	if ((vma->vm_flags & VM_LWK_HEAP) &&
-	    ((vma->vm_flags ^ vm_flags) & ~VM_MIXEDMAP))
-		return false;
+	unsigned long ignore = VM_SOFTDIRTY;
+
+	if (vma->vm_flags & VM_LWK_HEAP)
+		ignore |= VM_MIXEDMAP;
+
 	/*
 	 * VM_SOFTDIRTY should not prevent from VMA merging, if we
 	 * match the flags but dirty bit -- the caller should mark
@@ -806,7 +815,7 @@ static inline bool is_mergeable_vma(struct vm_area_struct *vma,
 	 * the kernel to generate new VMAs when old one could be
 	 * extended instead.
 	 */
-	if ((vma->vm_flags ^ vm_flags) & ~VM_SOFTDIRTY)
+	if ((vma->vm_flags ^ vm_flags) & ~ignore)
 		return false;
 	if (vma->vm_file != file)
 		return false;
@@ -2917,6 +2926,8 @@ cannot_expand:
 			goto free_vma;
 	} else {
 		vma_set_anonymous(vma);
+		if (is_lwkvma(vma))
+			vma_set_lwkvma(vma);
 	}
 
 	if (map_deny_write_exec(vma, vma->vm_flags)) {
@@ -3272,9 +3283,12 @@ int vm_brk_flags(unsigned long addr, unsigned long request, unsigned long flags)
 	if (!len)
 		return 0;
 
-	/* Until we need other flags, refuse anything except VM_EXEC. */
-	if ((flags & (~VM_EXEC)) != 0)
-		return -EINVAL;
+        /* Until we need other flags, refuse anything except VM_EXEC. */
+	if (is_lwkmem_enabled(current)) {
+		if (!(flags & VM_EXEC))
+			return -EINVAL;
+	} else if ((flags & (~VM_EXEC)) != 0)
+			return -EINVAL;
 
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;

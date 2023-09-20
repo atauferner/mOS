@@ -3918,6 +3918,11 @@ void cpuset_cpus_allowed(struct task_struct *tsk, struct cpumask *pmask)
 	spin_lock_irqsave(&callback_lock, flags);
 	rcu_read_lock();
 
+        if (is_lwk_process(tsk)) {
+		cpumask_copy(pmask, tsk->mos_process->lwkcpus);
+		goto out;
+        }
+
 	cs = task_cs(tsk);
 	if (cs != &top_cpuset)
 		guarantee_online_cpus(tsk, pmask);
@@ -3938,6 +3943,7 @@ void cpuset_cpus_allowed(struct task_struct *tsk, struct cpumask *pmask)
 			cpumask_copy(pmask, possible_mask);
 	}
 
+out:
 	rcu_read_unlock();
 	spin_unlock_irqrestore(&callback_lock, flags);
 }

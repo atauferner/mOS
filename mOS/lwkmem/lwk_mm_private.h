@@ -18,6 +18,8 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 
+#define LWKMEM_VERSION "2.1"
+
 #undef pr_fmt
 #define pr_fmt(fmt)		"mOS-mem: " fmt
 #define kaddr_to_pfn(va)        (__pa(va) >> PAGE_SHIFT)

@@ -19,8 +19,10 @@
 #include <linux/percpu-rwsem.h>
 #include <linux/delay.h>
 #include <linux/mos.h>
-#include <linux/memory.h>
 #include <trace/events/lwkmem.h>
+#include <linux/cma.h>
+#include <linux/memblock.h>
+#include <linux/memory.h>
 
 /* Private headers */
 #include "lwk_mm_private.h"
@@ -32,6 +34,7 @@
 #define MIN_CHUNK_SIZE		(SZ_4M)
 #endif
 
+#define SECTION_SIZE (1UL << SECTION_SIZE_BITS)
 #define MFMT "Node%3d: %-10s [%#018lx-%#018lx] pfn [%lu-%lu] [%lu] pages\n"
 #define LWKMEM_NODE_CLR_WAIT 10     /* ms */
 #define LWKMEM_NODE_CLR_POLL 30000  /* = 30000 x (10ms) = 300 sec = 5 mins */
@@ -72,6 +75,8 @@ struct lwkmem_clear_info {
 	atomic_t done;			/* Incremented on exit              */
 	unsigned long npages_total;     /* Total pages(in 4k) to clear      */
 };
+
+static struct cma *lwkcma[MAX_NUMNODES];
 
 /*
  * The function returns 'true' if there is no designated LWK memory
@@ -233,8 +238,8 @@ static void lwkpage_deinit(struct page *p)
 	/* Reset flags we set */
 	ClearPagePrivate(p);
 	clear_bit(PG_writeback, &p->flags);
-	ClearPageActive(p);
-	ClearPageUnevictable(p);
+	clear_bit(PG_active, &p->flags);
+	clear_bit(PG_unevictable, &p->flags);
 
 	/* Initialize 5 words union */
 	INIT_LIST_HEAD(&p->lru);
@@ -443,11 +448,8 @@ static int free_memory_to_linux(int nid)
 {
 	struct lwkmem_granule *curr, *next;
 	unsigned long start_pfn, nr_pages, i;
-	int error, rc = 0;
-	struct zone *zone;
-	struct memory_block *mblock;
+	int rc = 0;
 
-	lock_device_hotplug();
 	list_for_each_entry_safe(curr, next, &lwkmem[nid].list,
 				 list_designated) {
 		if (curr->owner != -1) {
@@ -461,118 +463,103 @@ static int free_memory_to_linux(int nid)
 
 		start_pfn = kaddr_to_pfn(curr->base);
 		nr_pages = bytes_to_pages(curr->length);
-		mblock = find_memory_block(pfn_to_section_nr(start_pfn));
-		zone = zone_for_pfn_range(MMOP_ONLINE_MOVABLE, nid, mblock->group,
-					  start_pfn, nr_pages);
+
+		pr_info("deiniting %lu pages at 0x%lx\n", nr_pages, start_pfn);
 
 		for (i = 0 ; i < nr_pages; i++)
 			lwkpage_deinit(pfn_to_page(start_pfn + i));
 
-		pr_info(MFMT, nid, "Onlining", __pa(curr->base),
+		pr_info(MFMT, nid, "Releasing", __pa(curr->base),
 			__pa(curr->base) + curr->length - 1, start_pfn,
 			start_pfn + nr_pages - 1,  nr_pages);
 
-		error = online_pages(start_pfn, nr_pages, zone, mblock->group);
-		if (error) {
-			rc = error;
+		if (!cma_release(lwkcma[nid], pfn_to_page(start_pfn), nr_pages)) {
+			rc = -EINVAL;
 			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: hotplug error, node:%d pfn:%ld pages:%lu",
+				"%s: cma_release() error, node:%d pfn:%ld pages:%lu",
 				__func__, nid, start_pfn, nr_pages);
 		}
 		kfree(curr);
 	}
-	unlock_device_hotplug();
+
 	return rc;
 }
 
-/*
- * Given a pfn range [start_pfn, end_pfn) checks if the range is
- * available for hotplugging.
- */
-static bool pfn_range_available(unsigned long start_pfn, unsigned long end_pfn)
-{
-	struct page *page;
-	unsigned long pfn;
-	struct zone *zone;
-
-	if (end_pfn <= start_pfn)
-		return false;
-
-	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
-		page = pfn_to_page(pfn);
-		zone = page_zone(page);
-		if (!pfn_in_present_section(pfn) || !pfn_valid(pfn) ||
-		    PageReserved(page) || PageHWPoison(page) || page_maybe_dma_pinned(page) ||
-		    zone_idx(zone) != ZONE_MOVABLE)
-			return false;
-	}
-	return true;
-}
 
 /*
- * Given a pfn range [start_pfn, end_pfn) the function searches for a
- * contiguous free physical memory range which is atleast unitsize bytes
- * or upto maxsize bytes large in size. Returns the start pfn of the
- * found free range, its size and start pfn of next range to inspect.
+ * Find contiguous range of free memory in the specified zone and NUMA domain.
+ * @start: memory range start address.  If zero then use zone start address.
+ * @size: desired size of memory range.  If zero then use zone size.
+ * @alignment: desired alignment in bytes
+ * @zone_id: desired memory zone (ZONE_NORMAL, ZONE_MOVABLE, etc.).
+ * @nid: desired NUMA domain ID.
  */
-static int find_contig_free_pfn_range(unsigned long start_pfn,
-		unsigned long end_pfn, unsigned long unitsize,
-		unsigned long maxsize, unsigned long *range_start_pfn,
-		unsigned long *range_next_start_pfn, unsigned long *range_size)
+s64 __init find_contiguous_memory_nid(phys_addr_t *start,
+					phys_addr_t size,
+					phys_addr_t alignment,
+					enum zone_type zone_id,
+					int nid)
 {
-	unsigned long pfn, pps = bytes_to_pages(unitsize);
+        s64 rc = 0;
+        unsigned long flags;
+        phys_addr_t res_start, res_end, end;
+        pg_data_t *pgdat = NODE_DATA(nid);
+        struct zone *zone = pgdat->node_zones + zone_id;
+        u64 i = 0;
 
-	if ((start_pfn >= end_pfn) ||		/* Empty range */
-	    (end_pfn < pps) ||			/* Underflow   */
-	    (start_pfn > end_pfn - pps) || 	/* Range < unitsize */
-	    (unitsize == 0) || (maxsize < unitsize)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"%s: EINVAL, range [%ld, %ld), unit %ld, max %ld",
-			__func__, start_pfn, end_pfn, unitsize, maxsize);
-		return -EINVAL;
+        if (!node_online(nid))
+                return -EINVAL;
+
+        if (zone_id >= __MAX_NR_ZONES)
+                return -EINVAL;
+
+        // Lock the zone and ensure it isn't empty.
+        spin_lock_irqsave(&zone->lock, flags);
+        if (zone_is_empty(zone)) {
+                rc = -ENOMEM;
+                goto out;
+        }
+
+	// If specified start address is zero then use zone start.
+	if (!*start)
+		*start = zone->zone_start_pfn << PAGE_SHIFT;
+
+	// If specified size is zero then use the size of the zone.
+	if (!size)
+                end = *start + (zone_managed_pages(zone) << PAGE_SHIFT);
+	else
+		end = *start + size;
+
+        // Loop through reserved memory areas checking for overlap with the desired memory range.
+        for_each_reserved_mem_range(i, &res_start, &res_end) {
+		pr_debug("0x%llx-0x%llx?\n", res_start, res_end);
+                if (res_end < *start)
+                        continue;  // reservation not up to our range yet, keep looking
+                else if (res_start > end)
+                        break; // reservation past our range, stop looking
+                else if (res_start < end) {
+                        if (res_start <= *start)
+                                *start = res_end + 1; // push start after this reservation
+                        else // res_start > start
+                                end = res_start - 1; // pull end before this reservation
+                }
+        }
+
+	*start = ALIGN(*start, alignment);
+
+        // Check for underflow.
+        if (end <= *start)
+                rc = -ENOMEM;
+	else {
+		rc = end - *start;
+		if (rc < 0)
+			rc = -EOVERFLOW;
 	}
 
-	*range_size = 0;
-	*range_next_start_pfn = start_pfn;
-	/* Retry until we get a free contig memory range of minimum unit size */
-	while (*range_size < unitsize) {
-		/* Reset the working range */
-		*range_size = 0;
-		*range_start_pfn = *range_next_start_pfn;
+out:
+        spin_unlock_irqrestore(&zone->lock, flags);
 
-		/* See how far the range grows within set bounds. */
-		pfn = *range_start_pfn;
-		while (pfn <= end_pfn - pps && *range_size < maxsize) {
-			if (!pfn_range_available(pfn, pfn + pps)) {
-				/* Skip this range next time */
-				*range_next_start_pfn = pfn + pps;
-				break;
-			}
-			pfn += pps;
-			*range_size += unitsize;
-			*range_next_start_pfn = pfn;
-		}
-
-		/* Are we done searching the entire range? */
-		if (pfn > end_pfn - pps)
-			break;
-	}
-
-	/*
-	 * This function needs maxsize to be multiple of unitsize,
-	 * so it is an unexpected error for search to return a range
-	 * greater than maxsize. The range_size is always <= maxsize.
-	 */
-	if (*range_size > maxsize) {
-		*range_size = 0;
-		*range_next_start_pfn = 0;
-		*range_next_start_pfn = 0;
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"%s: Unexpected error rs %ld maxsize %ld unitsize %ld",
-			__func__, *range_size, maxsize, unitsize);
-		return -EINVAL;
-	}
-	return 0;
+        return rc;
 }
 
 /*
@@ -583,146 +570,66 @@ static int find_contig_free_pfn_range(unsigned long start_pfn,
  */
 static unsigned long allocate_memory_from_linux(int nid, unsigned long size)
 {
-	int rc = 0;
-	unsigned long flags, nr_pages;
-	unsigned long total_size, block_size, section_size;
-	unsigned long start_pfn, end_pfn, pfn, pfn_next;
+	unsigned long nr_pages, total_size;
+	struct lwkmem_granule *curr;
+	struct page* page;
 
-	struct list_head granules;
-	struct lwkmem_granule *curr, *next;
-	pg_data_t *pgdat = NODE_DATA(nid);
-	struct zone *zone_movable = pgdat->node_zones + ZONE_MOVABLE, *zone;
-	struct memory_block *mblock;
-
-	INIT_LIST_HEAD(&granules);
 	total_size = 0;
 
+        if (!lwkcma[nid]) {
+                pr_err("CMA area doesn't exist for NID %d!\n", nid);
+                goto out;
+        }
+
+	size = min(cma_get_size(lwkcma[nid]), size);
+
 	/* Round down the request to section size boundary */
-	section_size = 1UL << SECTION_SIZE_BITS;
-	size = round_down(size, section_size);
-	if (size < section_size) {
+	size = round_down(size, SECTION_SIZE);
+	if (size < SECTION_SIZE) {
 		mos_ras(MOS_LWKCTL_WARNING,
 			"Node %d: size %ld bytes is less than min(%ld bytes)!",
-			nid, size, section_size);
+			nid, size, SECTION_SIZE);
 		return 0;
 	}
 
-	lock_device_hotplug();
 	if (!node_online(nid))
 		goto out;
 
-	/* Create a list of contig physical memory ranges that we can offline */
-	spin_lock_irqsave(&zone_movable->lock, flags);
-	if (zone_is_empty(zone_movable)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"Node %d: no ZONE_MOVABLE memory, cannot host LWKMEM.",
-			nid);
-		spin_unlock_irqrestore(&zone_movable->lock, flags);
+	// Allocate contiguous pages from the specified node.
+	nr_pages = bytes_to_pages(size);
+	page = cma_alloc(lwkcma[nid], nr_pages, get_order(SECTION_SIZE), false);
+	if (!page) {
+		pr_err("Allocation of %lu pages failed!\n", nr_pages);
 		goto out;
 	}
 
-	/* Find the start and end of movable region on this node */
-	start_pfn = zone_movable->zone_start_pfn;
-	end_pfn = zone_end_pfn(zone_movable);
-
-	/* Hotplug in granularity of memory section size */
-	start_pfn = SECTION_ALIGN_UP(start_pfn);
-	end_pfn = SECTION_ALIGN_DOWN(end_pfn);
-
-	if (start_pfn < zone_movable->zone_start_pfn || /* Overflow? */
-	    end_pfn <= start_pfn) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"Node %d: low ZONE_MOVABLE, min aligned %ld MB needed",
-			nid, section_size >> 20);
-		spin_unlock_irqrestore(&zone_movable->lock, flags);
+	// Allocate lwkmem granule for these pages.
+	curr = kmalloc(sizeof(struct lwkmem_granule), GFP_KERNEL);
+	if (!curr) {
+		pr_err("Failure allocating lwkmem granule.\n");
+		cma_release(lwkcma[nid], page, nr_pages);
 		goto out;
 	}
+	curr->base = pfn_to_kaddr(page_to_pfn(page));
+	curr->owner = -1;
+	curr->length = size;
+	total_size = size;
 
-	while (start_pfn < end_pfn && total_size < size) {
-		/* Get the next available contiguous memory region */
-		rc = find_contig_free_pfn_range(start_pfn, end_pfn,
-				section_size, size - total_size,
-				&pfn, &pfn_next, &block_size);
-		if (rc || block_size == 0)
-			break;
+	while (nr_pages--)
+		lwkpage_init(page++);
 
-		curr = kmalloc(sizeof(struct lwkmem_granule), GFP_KERNEL);
-		if (!curr) {
-			rc = -ENOMEM;
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Node %d: no free mem to allocate a granule",
-				nid);
-			break;
-		}
-		curr->base = pfn_to_kaddr(pfn);
-		curr->owner = -1;
-		curr->length = block_size;
-		list_add_tail(&curr->list_designated, &granules);
-		total_size += block_size;
-		pr_info(MFMT, nid, "Free range", __pa(curr->base),
-			__pa(curr->base) + block_size - 1, pfn,
-			pfn + bytes_to_pages(block_size) - 1,
-			bytes_to_pages(block_size));
-
-		start_pfn = pfn_next;
-	}
-	spin_unlock_irqrestore(&zone_movable->lock, flags);
-
-	/* Skip hotplugging memory if something went wrong during the search */
-	if (rc)
-		goto out;
-
-	/* Offline pages and add the granule to the requested list_head */
-	list_for_each_entry_safe(curr, next, &granules, list_designated) {
-		start_pfn = kaddr_to_pfn(curr->base);
-		nr_pages = bytes_to_pages(curr->length);
-		pr_info(MFMT, nid, "Offlining", __pa(curr->base),
-			__pa(curr->base) + curr->length - 1, start_pfn,
-			start_pfn + nr_pages - 1, nr_pages);
-		mblock = find_memory_block(pfn_to_section_nr(start_pfn));
-                zone = zone_for_pfn_range(MMOP_ONLINE_MOVABLE, nid, mblock->group,
-                                          start_pfn, nr_pages);
-		do {
-			/* We don't need a timeout here. Linux kernel 4.15
-			 * onwards offline_pages() doesn't implement timeout
-			 * anymore. It repeats until it sees an error -EINTR,
-			 * -EBUSY or -ENOMEM based on the error condition.
-			 * So we can safely retry here upon -EAGAIN which is
-			 * the correct behavior even with the future rebases.
-			 */
-			rc = offline_pages(start_pfn, nr_pages, zone, mblock->group);
-		} while (rc == -EAGAIN);
-
-		if (rc) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Node %d: hotplug error pfn %ld nr %ld rc %d",
-				nid, start_pfn, nr_pages, rc);
-		} else {
-			while (nr_pages--) {
-				lwkpage_init(pfn_to_page(start_pfn));
-				start_pfn++;
-			}
 #ifdef DEBUG_MEMORY_CLEARING
-			lwkmem_set_granule_memory(curr);
+	lwkmem_set_granule_memory(curr);
 #endif
-			list_del(&curr->list_designated);
-			lwkmem_insert_granule(nid, curr);
-		}
-	}
+
+	lwkmem_insert_granule(nid, curr);
 out:
-	/* Free up the list entries which where not offlined */
-	list_for_each_entry_safe(curr, next, &granules, list_designated) {
-		list_del(&curr->list_designated);
-		total_size -= curr->length;
-		kfree(curr);
-	}
-	unlock_device_hotplug();
 	return total_size;
 }
 
 /*
  * mos_mem_free
- *   Returns memory back to Linux which was previously offlined and provisioned
+ *   Returns memory back to Linux which was previously provisioned
  *   to LWK. In case of error on a NUMA node makes best efforts to continue to
  *   release memory held on NUMA nodes and eventually return error code for the
  *   last failure. This function is called from lwkctrl.c when the LWK memory
@@ -1359,6 +1266,54 @@ static struct mos_process_callbacks_t lwkmem_callbacks = {
 	.mos_process_exit = lwkmem_process_exit,
 };
 
+
+#define RESERVE_MEMORY SZ_16M
+/*
+ * Find contiguous, free, movable memory blocks for each NUMA domain and create
+ * a CMA area for it.
+ */
+int __init lwkmem_early_init(void)
+{
+	int n, rc = 0;
+
+	pr_info("LWKMEM v%s initializing ...\n", LWKMEM_VERSION);
+
+        // Declare as much CMA memory as possible for each NID.
+	// Leave a little bit of the memory for others.
+        for_each_online_node(n)
+        {
+		char name[CMA_MAX_NAME];
+                phys_addr_t start = 0;
+		s64 size = 0;
+
+                size = find_contiguous_memory_nid(&start, size,
+						  MIN_CHUNK_SIZE,
+						  ZONE_MOVABLE, n);
+		if (size < RESERVE_MEMORY) {
+			pr_warn("Failure finding suitable memory "
+				"for NID %d (%lld)\n", n, size);
+			continue;
+		}
+
+		// Declare CMA area for LWK memory in this NID.
+		size -= RESERVE_MEMORY;
+		snprintf(name, sizeof(name), "lwkcma_%d", n);
+		rc = cma_declare_contiguous_nid(start,
+						(phys_addr_t) size,
+						0, 0, 1, true, name,
+						&lwkcma[n], n);
+		if (rc)
+			pr_warn("cma_declare_contiguous_nid("
+				"start=0x%llx,size=%lld,nid=%d)"
+				" failed (%d)\n", start, size, n, rc);
+		else
+			pr_info("%llu bytes declared at 0x%llx"
+				" for NID %d.\n", size, start, n);
+        }
+
+	return rc;
+}
+
 /*
  * LWKMEM early initializations during kernel bootup.
  *
@@ -1367,11 +1322,10 @@ static struct mos_process_callbacks_t lwkmem_callbacks = {
  *   - Registers LWK per process callbacks related to LWKMEM.
  *   - Registers LWKMEM yod options.
  */
-static int __init lwkmem_early_init(void)
+static int __init lwkmem_subsys_init(void)
 {
 	int nid;
 
-	pr_info("LWKMEM v2.0!\n");
 	for (nid = 0; nid < MAX_NUMNODES; nid++) {
 		INIT_LIST_HEAD(&lwkmem[nid].list);
 		lwkmem[nid].n_free_pages = 0;
@@ -1380,6 +1334,9 @@ static int __init lwkmem_early_init(void)
 
 	mos_register_process_callbacks(&lwkmem_callbacks);
 	lwkmem_yod_options_init();
+
+	pr_info("LWKMEM v%s ready!\n", LWKMEM_VERSION);
+
 	return 0;
 }
-subsys_initcall(lwkmem_early_init);
+subsys_initcall(lwkmem_subsys_init);
