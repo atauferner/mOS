@@ -16,6 +16,8 @@
 #include <linux/mos.h>
 #include <trace/events/lwkmem.h>
 
+#include "../../mm/internal.h"
+
 /* Private headers */
 #include "lwk_mm_private.h"
 #include "../mm/internal.h"
@@ -368,26 +370,25 @@ static void clear_user_lwkpg(struct page *page, unsigned long page_size,
 int lwk_mm_map_pte(pmd_t *pmd, struct vm_area_struct *vma, unsigned long start,
 		   unsigned long end, struct list_head *list)
 {
+	int rc = 0;
 	pte_t *pte, *pte_start;
 	pte_t entry;
 	struct page *page;
 	spinlock_t *ptl;
-	unsigned long addr;
+	unsigned long addr = start;
 	struct mm_struct *mm = vma->vm_mm;
 
-	addr = start;
-	pte_start = pte_alloc_map_lock(mm, pmd, addr, &ptl);
+	pte_start = pte = pte_alloc_map_lock(mm, pmd, addr, &ptl);
 	if (!pte_start)
 		return -ENOMEM;
 
 	trace_mos_mm_pgtbl_map(TRACE_PTE, start, end);
-	pte = pte_start;
 	do {
 		if (pte_none(*pte)) {
 			if (unlikely(list_empty(list))) {
-				pte_unmap_unlock(pte, ptl);
 				LWKMEM_ERROR("page list is empty");
-				return -ENOMEM;
+				rc = -ENOMEM;
+				break;
 			}
 			page = list_first_entry(list, struct page, lru);
 			list_del(&page->lru);
@@ -396,12 +397,17 @@ int lwk_mm_map_pte(pmd_t *pmd, struct vm_area_struct *vma, unsigned long start,
 			entry = pte_clear_flags(entry, LWKPG_CLR_FLAGS);
 			entry = pte_mkwrite(entry, vma);
 			set_pte_at(mm, addr, pte, entry);
+		} else {
+			pr_err("Duplicate PTE for address 0x%lx, VMA 0x%p\n", addr, vma);
+			rc = -EINVAL;
+			break;
 		}
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 	pte_unmap_unlock(pte_start, ptl);
 
-	return 0;
+	return rc;
 }
+
 
 int lwk_mm_map_pmd(pud_t *pud, struct vm_area_struct *vma, unsigned long start,
 		   unsigned long end, enum lwk_page_type t,
@@ -409,14 +415,12 @@ int lwk_mm_map_pmd(pud_t *pud, struct vm_area_struct *vma, unsigned long start,
 
 {
 	int rc = 0;
-	pmd_t *pmd;
-	pmd_t entry;
+	pmd_t *pmd, entry;
 	struct page *page;
 	spinlock_t *ptl;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 	struct mm_struct *mm = vma->vm_mm;
 
-	addr = start;
 	pmd = pmd_alloc(mm, pud, addr);
 	if (!pmd)
 		return -ENOMEM;
@@ -428,9 +432,9 @@ int lwk_mm_map_pmd(pud_t *pud, struct vm_area_struct *vma, unsigned long start,
 		if (lwkpage_pmd_page(t)) {
 			if (pmd_none(*pmd)) {
 				if (unlikely(list_empty(list))) {
-					spin_unlock(ptl);
 					LWKMEM_ERROR("page list is empty");
-					return -ENOMEM;
+					rc = -ENOMEM;
+					break;
 				}
 
 				trace_mos_mm_pgtbl_map(TRACE_PMD, addr, next);
@@ -443,6 +447,9 @@ int lwk_mm_map_pmd(pud_t *pud, struct vm_area_struct *vma, unsigned long start,
 				entry = pmd_mkwrite(entry, vma);
 				entry = pmd_mkhuge(entry);
 				set_pmd_at(vma->vm_mm, addr, pmd, entry);
+			} else {
+				pr_err("Duplicate PMD for address 0x%lx, VMA 0x%p\n", addr, vma);
+				rc = -EINVAL;
 			}
 		} else
 			rc = lwk_mm_map_pte(pmd, vma, addr, next, list);
@@ -458,14 +465,12 @@ int lwk_mm_map_pud(p4d_t *p4d, struct vm_area_struct *vma, unsigned long start,
 		   struct list_head *list)
 {
 	int rc = 0;
-	pud_t *pud;
-	pud_t entry;
+	pud_t *pud, entry;
 	struct page *page;
 	spinlock_t *ptl;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 	struct mm_struct *mm = vma->vm_mm;
 
-	addr = start;
 	pud = pud_alloc(mm, p4d, addr);
 	if (!pud)
 		return -ENOMEM;
@@ -477,9 +482,9 @@ int lwk_mm_map_pud(p4d_t *p4d, struct vm_area_struct *vma, unsigned long start,
 		if (lwkpage_pud_page(t)) {
 			if (pud_none(*pud)) {
 				if (unlikely(list_empty(list))) {
-					spin_unlock(ptl);
 					LWKMEM_ERROR("page list is empty");
-					return -ENOMEM;
+					rc = -ENOMEM;
+					break;
 				}
 
 				trace_mos_mm_pgtbl_map(TRACE_PUD, addr, next);
@@ -492,6 +497,9 @@ int lwk_mm_map_pud(p4d_t *p4d, struct vm_area_struct *vma, unsigned long start,
 				entry = pud_mkwrite(entry);
 				entry = pud_mkhuge(entry);
 				set_pud_at(vma->vm_mm, addr, pud, entry);
+			} else {
+				pr_err("Duplicate PUD for address 0x%lx, VMA 0x%p\n", addr, vma);
+				rc = -EINVAL;
 			}
 		} else
 			rc = lwk_mm_map_pmd(pud, vma, addr, next, t, list);
@@ -508,9 +516,8 @@ int lwk_mm_map_p4d(pgd_t *pgd, struct vm_area_struct *vma, unsigned long start,
 {
 	int rc;
 	p4d_t *p4d;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 
-	addr = start;
 	p4d = p4d_alloc(vma->vm_mm, pgd, addr);
 	if (!p4d)
 		return -ENOMEM;
@@ -528,7 +535,7 @@ int lwk_mm_map_pages(struct vm_area_struct *vma, unsigned long start,
 {
 	int rc = -EINVAL;
 	pgd_t *pgd;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 
 	if (!vma || !vma->vm_mm || start >= end || !list ||
 	    list_empty(list) || !valid_lwkpage_type(t))
@@ -542,7 +549,6 @@ int lwk_mm_map_pages(struct vm_area_struct *vma, unsigned long start,
 
 	trace_mos_mm_pgtbl_map_pages(start, end, t);
 
-	addr = start;
 	pgd = pgd_offset(vma->vm_mm, start);
 	do {
 		next = pgd_addr_end(addr, end);
@@ -566,13 +572,11 @@ static void lwk_mm_unmap_pte(struct vm_area_struct *vma, pmd_t *pmd,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t *pte, *start_pte;
-	unsigned long addr;
+	unsigned long addr = start;
 	struct page *page;
 	spinlock_t *ptl;
 
-	addr = start;
-	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
-	pte = start_pte;
+	start_pte = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	trace_mos_mm_pgtbl_unmap(TRACE_PTE, start, end);
 
 	do {
@@ -593,12 +597,11 @@ static void lwk_mm_unmap_pmd(struct vm_area_struct *vma, pud_t *pud,
 			     struct list_head (*list)[LWK_MAX_NUMPGTYPES])
 {
 	struct mm_struct *mm = vma->vm_mm;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 	pmd_t *pmd;
 	struct page *page;
 	spinlock_t *ptl;
 
-	addr = start;
 	pmd = pmd_offset(pud, addr);
 
 	do {
@@ -631,12 +634,11 @@ static void lwk_mm_unmap_pud(struct vm_area_struct *vma, p4d_t *p4d,
 			     struct list_head (*list)[LWK_MAX_NUMPGTYPES])
 {
 	struct mm_struct *mm = vma->vm_mm;
-	unsigned long addr, next;
+	unsigned long addr = start, next;
 	pud_t *pud;
 	struct page *page;
 	spinlock_t *ptl;
 
-	addr = start;
 	pud = pud_offset(p4d, addr);
 
 	do {
@@ -668,11 +670,8 @@ static void lwk_mm_unmap_p4d(struct vm_area_struct *vma, pgd_t *pgd,
 			     unsigned long start, unsigned long end,
 			     struct list_head (*list)[LWK_MAX_NUMPGTYPES])
 {
-	unsigned long addr, next;
-	p4d_t *p4d;
-
-	addr = start;
-	p4d = p4d_offset(pgd, addr);
+	unsigned long addr = start, next;
+	p4d_t *p4d = p4d_offset(pgd, addr);
 
 	do {
 		next = p4d_addr_end(addr, end);

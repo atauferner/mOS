@@ -774,6 +774,8 @@ extern int free_lwk_mm(void);
 extern int register_lwk_pma(enum lwk_pma_type pma_type,
 			    struct lwk_pm_factory_operations *factory_ops,
 			    struct lwk_pm_operations *pm_ops);
+extern int __init lwkmem_early_init(void);
+
 /*
  * Interface between Linux and LWK memory management VM operations.
  *
@@ -920,6 +922,11 @@ unsigned long lwkmem_elf_map(unsigned long map_start,
 			unsigned long size, unsigned long total_size)
 {
 	return -EINVAL;
+}
+
+static inline int __init lwkmem_early_init(void)
+{
+	return 0;
 }
 #endif
 #endif // _LINUX_MOSLWKMEM_H

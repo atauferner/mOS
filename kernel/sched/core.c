@@ -3200,7 +3200,7 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 
         if (is_mos_process(p) &&
             !is_migration_mask_valid_mos(ctx->new_mask, p)) {
-                ret = -EINVAL;
+		ret = -EINVAL;
                 goto out;
         }
 
@@ -3209,7 +3209,7 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 	if (is_mos_process(p))
 		dest_cpu = select_next_cpu_mos(p, ctx->new_mask);
 	else if (cpu_islwkcpu(dest_cpu))
-	  dest_cpu = select_fallback_rq(dest_cpu, p);
+		dest_cpu = select_fallback_rq(dest_cpu, p);
 
 	return affine_move_task(rq, p, rf, dest_cpu, ctx->flags);
 
@@ -8462,52 +8462,39 @@ __sched_setaffinity(struct task_struct *p, struct affinity_context *ctx)
 	ctx->new_mask = new_mask;
 	ctx->flags |= SCA_CHECK;
 
-        if (!is_mos_process(p)) {
-                cpuset_cpus_allowed(p, cpus_allowed);
-                cpumask_and(new_mask, ctx->new_mask, cpus_allowed);
-        } else {
-                /* Restrict allowed cpu targets to the lwk cpus */
-                set_to_lwkcpus_mos(cpus_allowed, p);
-                cpumask_and(new_mask, ctx->new_mask, cpus_allowed);
-                /* Is sched_setaffinity disabled for this mOS process */
-                if (is_setaffinity_disabled_mos(p, &retval))
-                        goto out_free_new_mask;
-                /* Bump the count of mOS setaffinity */
-                bump_setaffinity_count_mos();
-        }
-
 	retval = dl_task_check_affinity(p, new_mask);
 	if (retval)
 		goto out_free_new_mask;
 
 	retval = __set_cpus_allowed_ptr(p, ctx);
-	if (!retval && !is_mos_process(p)) {
-		cpuset_cpus_allowed(p, cpus_allowed);
-		if (!cpumask_subset(new_mask, cpus_allowed) && !is_mos_process(p)) {
-			/*
-			 * We must have raced with a concurrent cpuset update.
-			 * Just reset the cpumask to the cpuset's cpus_allowed.
-			 */
-			cpumask_copy(new_mask, cpus_allowed);
+	if (retval)
+		goto out_free_new_mask;
 
-			/*
-			 * If SCA_USER is set, a 2nd call to __set_cpus_allowed_ptr()
-			 * will restore the previous user_cpus_ptr value.
-			 *
-			 * In the unlikely event a previous user_cpus_ptr exists,
-			 * we need to further restrict the mask to what is allowed
-			 * by that old user_cpus_ptr.
-			 */
-			if (unlikely((ctx->flags & SCA_USER) && ctx->user_mask)) {
-				bool empty = !cpumask_and(new_mask, new_mask,
-							  ctx->user_mask);
+	cpuset_cpus_allowed(p, cpus_allowed);
+	if (!cpumask_subset(new_mask, cpus_allowed)) {
+		/*
+		 * We must have raced with a concurrent cpuset update.
+		 * Just reset the cpumask to the cpuset's cpus_allowed.
+		 */
+		cpumask_copy(new_mask, cpus_allowed);
 
-				if (WARN_ON_ONCE(empty))
-					cpumask_copy(new_mask, cpus_allowed);
-			}
-			__set_cpus_allowed_ptr(p, ctx);
-			retval = -EINVAL;
+		/*
+		 * If SCA_USER is set, a 2nd call to __set_cpus_allowed_ptr()
+		 * will restore the previous user_cpus_ptr value.
+		 *
+		 * In the unlikely event a previous user_cpus_ptr exists,
+		 * we need to further restrict the mask to what is allowed
+		 * by that old user_cpus_ptr.
+		 */
+		if (unlikely((ctx->flags & SCA_USER) && ctx->user_mask)) {
+			bool empty = !cpumask_and(new_mask, new_mask,
+						  ctx->user_mask);
+
+			if (WARN_ON_ONCE(empty))
+				cpumask_copy(new_mask, cpus_allowed);
 		}
+		__set_cpus_allowed_ptr(p, ctx);
+		retval = -EINVAL;
 	}
 
 out_free_new_mask:
@@ -8540,6 +8527,13 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (retval)
 		return retval;
 
+	if (is_mos_process(p)) {
+		if (is_setaffinity_disabled_mos(p, &retval))
+		       goto out;
+		/* Bump the count of mOS setaffinity */
+		bump_setaffinity_count_mos();
+	}
+
 	/*
 	 * With non-SMP configs, user_cpus_ptr/user_mask isn't used and
 	 * alloc_user_cpus_ptr() returns NULL.
@@ -8559,7 +8553,7 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 
 	retval = __sched_setaffinity(p, &ac);
 	kfree(ac.user_mask);
-
+out:
 	return retval;
 }
 

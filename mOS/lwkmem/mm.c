@@ -442,7 +442,7 @@ unsigned long lwk_mm_elf_map(unsigned long map_start, unsigned long map_size,
 	int rc;
 	ssize_t bytes_read;
 	loff_t pos = offset;
-	unsigned long vm_flags = VM_LWK | VM_LWK_DBSS | VM_LWK_EXTRA;
+	unsigned long vm_flags = VM_LWK | VM_LWK_DBSS | VM_LWK_EXTRA | VM_EXEC;
 	unsigned long rval;
 
 	/*
@@ -468,6 +468,7 @@ unsigned long lwk_mm_elf_map(unsigned long map_start, unsigned long map_size,
 		LWKMEM_ERROR("Failed to read ELF segment from file");
 		return -EINVAL;
 	}
+
 	return map_start;
 }
 

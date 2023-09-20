@@ -417,14 +417,15 @@ static unsigned long elf_load(struct file *filep, unsigned long addr,
 				       		  eppnt->p_offset, addr,
 						  eppnt->p_filesz,
 						  ELF_PAGEALIGN(total_size));
-		}
 
-		if (!BAD_ADDR(map_addr))
-			goto last;
+			if (!BAD_ADDR(map_addr))
+				goto mapped;
+		}
 
 		map_addr = elf_map(filep, addr, eppnt, prot, type, total_size);
 		if (BAD_ADDR(map_addr))
 			return map_addr;
+mapped:
 		if (eppnt->p_memsz > eppnt->p_filesz) {
 			zero_start = map_addr + ELF_PAGEOFFSET(eppnt->p_vaddr) +
 				eppnt->p_filesz;
@@ -443,7 +444,6 @@ static unsigned long elf_load(struct file *filep, unsigned long addr,
 		zero_end = zero_start + ELF_PAGEOFFSET(eppnt->p_vaddr) +
 			eppnt->p_memsz;
 	}
-last:
 	if (eppnt->p_memsz > eppnt->p_filesz) {
 		/*
 		 * Map the last of the segment.

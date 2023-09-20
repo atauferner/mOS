@@ -13,6 +13,8 @@
 #include <linux/rmap.h>
 #include <linux/tracepoint-defs.h>
 
+#include <linux/moslwkmem.h>
+
 struct folio_batch;
 
 /*
@@ -440,7 +442,10 @@ static inline void prep_compound_tail(struct page *head, int tail_idx)
 
 	p->mapping = TAIL_MAPPING;
 	set_compound_head(p, head);
-	set_page_private(p, 0);
+	if (is_lwkpg(p))
+		set_page_private(p, _LWKPG);
+	else
+		set_page_private(p, 0);
 }
 
 extern void prep_compound_page(struct page *page, unsigned int order);
