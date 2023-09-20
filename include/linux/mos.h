@@ -69,6 +69,11 @@
 #define MOS_NR_GPUS 64
 #define MOS_MAX_ALLOWED_DRIVERS 8
 
+#define pr_mos(format, ...)   if (is_mostask() || is_lwk_process(current)) pr_info(format, ##__VA_ARGS__);
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+#define pr_mos_dbg(format, ...)   if (is_mostask() || is_lwk_process(current)) pr_info("[%u] %s(%s:%u) "format"\n", current->pid,  __func__, __FILENAME__, __LINE__,  ##__VA_ARGS__);
+
+
 /*
  * Currently nr_gpumask_bits represents GPU devices. In the future sub-devices
  * (i.e. tiles) may be included in the mask. That is why we are not directly

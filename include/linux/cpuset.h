@@ -199,7 +199,10 @@ static inline void cpuset_unlock(void) { }
 static inline void cpuset_cpus_allowed(struct task_struct *p,
 				       struct cpumask *mask)
 {
-	cpumask_copy(mask, task_cpu_possible_mask(p));
+	if (is_mos_process(p))
+		cpumask_copy(mask, p->mos_process->lwkcpus);
+	else
+		cpumask_copy(mask, task_cpu_possible_mask(p));
 }
 
 static inline bool cpuset_cpus_allowed_fallback(struct task_struct *p)

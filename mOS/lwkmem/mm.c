@@ -353,7 +353,7 @@ static int lwk_mm_fork(struct vm_area_struct *old_vma,
 
 	for (addr = old_vma->vm_start; addr < end; addr += PAGE_SIZE) {
 		/* Get the old page from parent process i.e. caller */
-		ret = get_user_pages(addr, 1, 0, &src_page, NULL);
+		ret = get_user_pages(addr, 1, 0, &src_page);
 
 		if (ret == 0)
 			continue;
@@ -383,7 +383,7 @@ static int lwk_mm_fork(struct vm_area_struct *old_vma,
 		 */
 		ret = get_user_pages_remote(new_vma->vm_mm, addr, 1,
 					    FOLL_WRITE,
-					    &dst_page, NULL, NULL);
+					    &dst_page, NULL);
 		if (ret <= 0) {
 			LWKMEM_ERROR("Could not get dst page at: %#lx rc %ld",
 				     addr, ret);
@@ -442,7 +442,7 @@ unsigned long lwk_mm_elf_map(unsigned long map_start, unsigned long map_size,
 	int rc;
 	ssize_t bytes_read;
 	loff_t pos = offset;
-	unsigned long vm_flags = VM_LWK | VM_LWK_DBSS | VM_LWK_EXTRA;
+	unsigned long vm_flags = VM_LWK | VM_LWK_DBSS | VM_LWK_EXTRA | VM_EXEC;
 	unsigned long rval;
 
 	/*
@@ -468,6 +468,7 @@ unsigned long lwk_mm_elf_map(unsigned long map_start, unsigned long map_size,
 		LWKMEM_ERROR("Failed to read ELF segment from file");
 		return -EINVAL;
 	}
+
 	return map_start;
 }
 
